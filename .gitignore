@@ -1,0 +1,29 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+/tmp/
+sudoku-panel
+panel
+
+# Data (local dev)
+data/
+*.db
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+*.test
+coverage.out
+
+# Env
+.env
+.env.*
