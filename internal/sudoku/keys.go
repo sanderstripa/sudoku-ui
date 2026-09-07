@@ -7,16 +7,33 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
-// KeyPair хранит мастер-ключи
 type KeyPair struct {
 	MasterPrivateKey string `json:"master_private_key"`
 	MasterPublicKey  string `json:"master_public_key"`
 }
 
-// GenerateMasterKeyPair вызывает бинарник sudoku -keygen
+func extractKey(line, label string) string {
+	idx := strings.Index(strings.ToLower(line), strings.ToLower(label))
+	if idx == -1 {
+		return ""
+	}
+	rest := line[idx+len(label):]
+	rest = strings.TrimLeft(rest, ": \t")
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return ""
+	}
+	key := fields[0]
+	if matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32,}$`, key); matched {
+		return key
+	}
+	return ""
+}
+
 func GenerateMasterKeyPair(binaryPath string) (*KeyPair, error) {
 	cmd := exec.Command(binaryPath, "-keygen")
 	out, err := cmd.CombinedOutput()
@@ -25,18 +42,17 @@ func GenerateMasterKeyPair(binaryPath string) (*KeyPair, error) {
 	}
 
 	kp := &KeyPair{}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Master Private Key:") {
-			kp.MasterPrivateKey = strings.TrimSpace(strings.TrimPrefix(line, "Master Private Key:"))
+		if kp.MasterPrivateKey == "" {
+			if k := extractKey(line, "Master Private Key"); k != "" {
+				kp.MasterPrivateKey = k
+			}
 		}
-		if strings.HasPrefix(line, "Master Public Key:") {
-			kp.MasterPublicKey = strings.TrimSpace(strings.TrimPrefix(line, "Master Public Key:"))
-		}
-		// Также ловим Available Private Key на всякий случай
-		if strings.HasPrefix(line, "Available Private Key:") {
-			// Не используем как мастер
+		if kp.MasterPublicKey == "" {
+			if k := extractKey(line, "Master Public Key"); k != "" {
+				kp.MasterPublicKey = k
+			}
 		}
 	}
 
@@ -47,7 +63,6 @@ func GenerateMasterKeyPair(binaryPath string) (*KeyPair, error) {
 	return kp, nil
 }
 
-// GenerateSplitPrivateKey генерирует новый клиентский ключ от мастер-приватного
 func GenerateSplitPrivateKey(binaryPath, masterPrivateKey string) (string, error) {
 	cmd := exec.Command(binaryPath, "-keygen", "-more", masterPrivateKey)
 	out, err := cmd.CombinedOutput()
@@ -55,28 +70,24 @@ func GenerateSplitPrivateKey(binaryPath, masterPrivateKey string) (string, error
 		return "", fmt.Errorf("split keygen failed: %w\noutput: %s", err, string(out))
 	}
 
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Split Private Key:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Split Private Key:")), nil
+		if k := extractKey(line, "Split Private Key"); k != "" {
+			return k, nil
 		}
-		// Иногда может называться Available Private Key
-		if strings.HasPrefix(line, "Available Private Key:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Available Private Key:")), nil
+		if k := extractKey(line, "Available Private Key"); k != "" {
+			return k, nil
 		}
 	}
 
 	return "", fmt.Errorf("failed to parse split key from output:\n%s", string(out))
 }
 
-// UserHash возвращает короткий идентификатор пользователя (как в API Sudoku)
 func UserHash(privateKey string) string {
 	h := sha256.Sum256([]byte(privateKey))
 	return hex.EncodeToString(h[:8])
 }
 
-// SaveKeyPair сохраняет мастер-ключи в файл
 func SaveKeyPair(path string, kp *KeyPair) error {
 	data, err := json.MarshalIndent(kp, "", "  ")
 	if err != nil {
@@ -85,7 +96,6 @@ func SaveKeyPair(path string, kp *KeyPair) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// LoadKeyPair загружает мастер-ключи
 func LoadKeyPair(path string) (*KeyPair, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

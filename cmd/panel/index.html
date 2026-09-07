@@ -110,6 +110,7 @@
       <canvas id="qrcode"></canvas>
     </div>
     <div class="flex gap-2">
+      <button onclick="copyAll()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg">Копировать все</button>
       <button onclick="copyLink()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg">Копировать</button>
       <button onclick="closeModal()" class="flex-1 bg-gray-200 dark:bg-gray-700 py-2 rounded-lg">Закрыть</button>
     </div>
@@ -252,26 +253,73 @@ async function deleteClient(id) {
   }
 }
 
+let currentCreds = {};
+
 async function showLink(id, name) {
   try {
     const data = await api('/clients/' + id + '/link');
     currentLink = data.short_link || '';
+    currentCreds = data.credentials || {};
     document.getElementById('modal-name').textContent = name;
-    document.getElementById('modal-link').textContent = currentLink || (data.error || 'Не удалось сгенерировать ссылку (нет бинарника Sudoku)');
-    
+
+    const c = currentCreds;
+    const rows = [
+      ['Тип', 'Sudoku'],
+      ['Адрес', c.address || '—'],
+      ['Порт', c.port || '—'],
+      ['Пароль (ключ)', c.password || '—'],
+      ['Метод', c.method || 'chacha20-poly1305'],
+      ['Тип таблицы', c.ascii || 'prefer_entropy'],
+      ['Padding min', c.padding_min ?? 5],
+      ['Padding max', c.padding_max ?? 15],
+      ['Pure Downlink', c.pure_downlink ? 'Да' : 'Нет'],
+      ['HTTP-маскировка', c.http_mask ? 'Вкл' : 'Выкл'],
+    ];
+
+    let box = document.getElementById('creds-box');
+    if (!box) {
+      // вставляем блок если его нет в старой вёрстке
+      const linkEl = document.getElementById('modal-link');
+      box = document.createElement('div');
+      box.id = 'creds-box';
+      box.className = 'space-y-1 text-sm mb-4';
+      linkEl.parentNode.insertBefore(box, linkEl);
+    }
+    box.innerHTML = rows.map(([k,v]) =>
+      '<div class="flex justify-between gap-3 py-1.5 border-b border-gray-100">' +
+      '<span class="text-gray-500 shrink-0">' + k + '</span>' +
+      '<span class="font-mono text-right break-all text-xs">' + String(v).replace(/</g,'&lt;') + '</span></div>'
+    ).join('');
+
+    document.getElementById('modal-link').textContent = currentLink || (data.error || '—');
+
     const canvas = document.getElementById('qrcode');
-    if (currentLink && window.QRCode) {
-      QRCode.toCanvas(canvas, currentLink, { width: 200, margin: 2 });
-    } else {
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (canvas && currentLink && window.QRCode) {
+      QRCode.toCanvas(canvas, currentLink, { width: 160, margin: 1 });
     }
 
     document.getElementById('link-modal').classList.remove('hidden');
     document.getElementById('link-modal').classList.add('flex');
   } catch (e) {
-    alert('Ошибка получения ссылки');
+    alert('Ошибка: ' + e.message);
   }
+}
+
+function copyAll() {
+  const c = currentCreds || {};
+  const text = [
+    'Тип: Sudoku',
+    'Адрес: ' + (c.address || ''),
+    'Порт: ' + (c.port || ''),
+    'Пароль: ' + (c.password || ''),
+    'Метод: ' + (c.method || 'chacha20-poly1305'),
+    'Тип таблицы: ' + (c.ascii || 'prefer_entropy'),
+    'Padding min: ' + (c.padding_min ?? 5),
+    'Padding max: ' + (c.padding_max ?? 15),
+    '',
+    currentLink || ''
+  ].join('\n');
+  navigator.clipboard.writeText(text).then(() => alert('Скопировано!'));
 }
 
 function closeModal() {

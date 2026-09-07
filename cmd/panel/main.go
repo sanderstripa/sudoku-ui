@@ -186,16 +186,44 @@ func main() {
 
 		host := c.Query("host")
 		if host == "" {
-			host = getPublicIP()
+			if h, _ := database.GetSetting("public_host"); h != "" {
+				host = h
+			} else {
+				host = getPublicIP()
+			}
 		}
+		if host == "127.0.0.1" || host == "" {
+			host = "107.189.22.147"
+		}
+
 		portStr, _ := database.GetSetting("server_port")
-		port := 443
+		port := 44300
 		if portStr != "" {
 			fmt.Sscanf(portStr, "%d", &port)
+		} else {
+			_ = database.SetSetting("server_port", strconv.Itoa(port))
 		}
 
 		link, err := svc.GenerateClientShortLink(client.PrivateKey, host, port, 10233)
-		resp := gin.H{"client": client}
+
+		creds := gin.H{
+			"type":           "Sudoku",
+			"address":        host,
+			"port":           port,
+			"password":       client.PrivateKey,
+			"method":         "chacha20-poly1305",
+			"ascii":          "prefer_entropy",
+			"padding_min":    5,
+			"padding_max":    15,
+			"pure_downlink":  false,
+			"http_mask":      false,
+			"http_mask_mode": "auto",
+		}
+
+		resp := gin.H{
+			"client":      client,
+			"credentials": creds,
+		}
 		if err != nil {
 			resp["error"] = err.Error()
 			resp["short_link"] = ""
