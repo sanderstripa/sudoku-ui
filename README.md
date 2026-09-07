@@ -1,74 +1,81 @@
 # Sudoku UI
 
-Веб-панель для управления VPN на протоколе **Sudoku** (аналог 3x-ui).
+Веб-панель для управления VPN-протоколом [Sudoku](https://github.com/SUDOKU-ASCII/sudoku).
 
-## Возможности MVP
+Аналог 3x-ui, но для Sudoku: создание клиентов, генерация ключей, `sudoku://` ссылок и полных учётных данных.
 
-- ✅ One-click установка (`install.sh`)
-- ✅ Веб-панель с авторизацией (JWT + bcrypt)
-- ✅ Создание / удаление клиентов
-- ✅ Генерация `sudoku://` ссылок + QR-код
-- ✅ Обновление ядра Sudoku одной кнопкой
-- ✅ Управление через systemd
-
-## Быстрый старт (разработка)
+## One-Click Install
 
 ```bash
-# Зависимости уже в go.mod
-go build -o /tmp/sudoku-panel ./cmd/panel
-/tmp/sudoku-panel
-```
-
-Открой http://localhost:2053  
-Логин: `admin` / Пароль: `admin`
-
-## Установка на VPS
-
-```bash
-# После публикации репозитория:
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/YOUR_REPO/sudoku-ui/main/install.sh)"
-
-# Или локально:
-sudo bash install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/sanderstripa/sudoku-ui/main/install.sh)
 ```
 
 После установки:
-- Панель: `http://IP:2053`
-- Логин/пароль: `admin` / `admin` (смени сразу!)
+
+| | |
+|---|---|
+| **Панель** | `http://IP:2053` |
+| **Логин** | `admin` |
+| **Пароль** | `admin` |
+| **VPN порт** | `44300` |
+
+> Смени пароль после первого входа!
+
+## Что умеет
+
+- Создание / удаление клиентов (инбаундов)
+- Генерация split private keys от master key
+- `sudoku://` short links + QR
+- Полные учётные данные (адрес, порт, ключ, метод, ascii mode, padding…)
+- Обновление ядра Sudoku одной кнопкой
+- Systemd: автозапуск панели и ядра
+
+## Управление
+
+```bash
+systemctl status sudoku-panel
+systemctl status sudoku-core
+systemctl restart sudoku-panel
+systemctl restart sudoku-core
+
+# логи
+journalctl -u sudoku-panel -f
+journalctl -u sudoku-core -f
+```
+
+## Ручная установка
+
+```bash
+git clone https://github.com/sanderstripa/sudoku-ui.git
+cd sudoku-ui
+# нужен Go 1.21+
+go build -o bin/sudoku-panel ./cmd/panel
+# скачать ядро Sudoku в data/bin/sudoku
+./bin/sudoku-panel
+```
+
+## Переменные окружения
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `PANEL_PORT` | `2053` | Порт веб-панели |
+| `SUDOKU_PORT` | `44300` | Порт VPN (в install.sh) |
+| `DATA_DIR` | `./data` | Каталог данных |
 
 ## Структура
 
 ```
-cmd/panel/          — точка входа + frontend
-internal/
-  auth/             — JWT + bcrypt
-  config/           — пути и константы
-  db/               — SQLite
-  models/           — структуры
-  sudoku/           — ключи, сервис, обновление ядра
-web/                — исходник index.html
-install.sh          — one-click installer
+sudoku-ui/
+├── cmd/panel/          # точка входа панели
+├── internal/
+│   ├── auth/           # JWT
+│   ├── db/             # SQLite
+│   ├── sudoku/         # ключи, ссылки, update core
+│   └── ...
+├── install.sh          # one-click
+└── data/               # runtime (ключи, бинарник, БД)
 ```
 
-## API (кратко)
+## Лицензия
 
-| Метод | Путь | Описание |
-|-------|------|----------|
-| POST | /api/login | Вход |
-| GET | /api/status | Статус |
-| GET/POST | /api/clients | Список / создать |
-| DELETE | /api/clients/:id | Удалить |
-| GET | /api/clients/:id/link | Ссылка + QR данные |
-| POST | /api/update-core | Обновить ядро Sudoku |
-| POST | /api/change-password | Сменить пароль |
-
-## Дальнейшее развитие
-
-- Лимиты трафика / срок действия
-- Multi-node
-- Полноценный Vue/React фронт
-- Подписки (subscription URL)
-
----
-
-Сделано в стиле vibe-coding.
+MIT
