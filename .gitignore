@@ -6,7 +6,7 @@ bin/
 *.dylib
 /tmp/
 sudoku-panel
-panel
+/panel
 
 # Data (local dev)
 data/
