@@ -1,0 +1,32 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm64
+            suffix: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui .
+          tar -czf sudoku-ui-${{ matrix.suffix }}.tar.gz sudoku-ui
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sudoku-ui-${{ matrix.suffix }}.tar.gz
+          generate_release_notes: true

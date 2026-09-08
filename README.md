@@ -1,81 +1,65 @@
 # Sudoku UI
 
-Веб-панель для управления VPN-протоколом [Sudoku](https://github.com/SUDOKU-ASCII/sudoku).
+Minimal web panel for managing the official [SUDOKU-ASCII/sudoku](https://github.com/SUDOKU-ASCII/sudoku) server on a single VPS.
 
-Аналог 3x-ui, но для Sudoku: создание клиентов, генерация ключей, `sudoku://` ссылок и полных учётных данных.
+The product model is deliberately simple: **one VPS = one Sudoku UI panel**. The panel manages Sudoku connections running on that VPS and generates client access keys for them.
 
-## One-Click Install
+## v0.1 features
+
+- One-screen Russian UI.
+- CPU, RAM, disk and network traffic monitoring.
+- Create/delete/restart Sudoku connections on separate TCP ports.
+- Official Sudoku key generation (`-keygen`, `-keygen -more`).
+- Client `sudoku://` link, QR code and manual connection parameters.
+- Logs in a modal window.
+- Manual update of the official Sudoku core from GitHub Releases.
+- Manual update of Sudoku UI from its own GitHub Releases.
+- One-click installer that creates a random panel port, username and password.
+- systemd template service (`sudoku@<id>.service`) for panel-managed connections.
+
+## One-click install
+
+Run as root on a supported Linux VPS:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/sanderstripa/sudoku-ui/main/install.sh)
 ```
 
-После установки:
+When using a non-root shell, run `sudo -i` first and then execute the command above.
 
-| | |
-|---|---|
-| **Панель** | `http://IP:2053` |
-| **Логин** | `admin` |
-| **Пароль** | `admin` |
-| **VPN порт** | `44300` |
-
-> Смени пароль после первого входа!
-
-## Что умеет
-
-- Создание / удаление клиентов (инбаундов)
-- Генерация split private keys от master key
-- `sudoku://` short links + QR
-- Полные учётные данные (адрес, порт, ключ, метод, ascii mode, padding…)
-- Обновление ядра Sudoku одной кнопкой
-- Systemd: автозапуск панели и ядра
-
-## Управление
+## Local development
 
 ```bash
-systemctl status sudoku-panel
-systemctl status sudoku-core
-systemctl restart sudoku-panel
-systemctl restart sudoku-core
-
-# логи
-journalctl -u sudoku-panel -f
-journalctl -u sudoku-core -f
+go build -o sudoku-ui .
 ```
 
-## Ручная установка
+The production program expects `/etc/sudoku-ui/config.json`; the installer creates it automatically.
 
-```bash
-git clone https://github.com/sanderstripa/sudoku-ui.git
-cd sudoku-ui
-# нужен Go 1.21+
-go build -o bin/sudoku-panel ./cmd/panel
-# скачать ядро Sudoku в data/bin/sudoku
-./bin/sudoku-panel
+## Server-side layout
+
+```text
+/usr/local/bin/sudoku-ui
+/usr/local/bin/sudoku
+/etc/sudoku-ui/config.json
+/etc/sudoku-ui/state.json
+/etc/sudoku-ui/connections/<id>.json
+/etc/systemd/system/sudoku-ui.service
+/etc/systemd/system/sudoku@.service
 ```
 
-## Переменные окружения
+## Key model
 
-| Переменная | По умолчанию | Описание |
-|------------|--------------|----------|
-| `PANEL_PORT` | `2053` | Порт веб-панели |
-| `SUDOKU_PORT` | `44300` | Порт VPN (в install.sh) |
-| `DATA_DIR` | `./data` | Каталог данных |
+Sudoku uses a Master Public Key on the server. The panel stores the corresponding Master Private Key locally with mode `0600` so it can generate additional Split Private Keys for client devices using the upstream CLI. Master private keys are never returned by the HTTP API.
 
-## Структура
+> Important: current upstream Sudoku does not provide a server-side per-client allow/revoke list like Xray UUID clients. Removing a key from this panel removes it from panel storage, but does not cryptographically revoke a copy that has already been exported. True per-key revocation requires rotating the connection's master key.
 
-```
-sudoku-ui/
-├── cmd/panel/          # точка входа панели
-├── internal/
-│   ├── auth/           # JWT
-│   ├── db/             # SQLite
-│   ├── sudoku/         # ключи, ссылки, update core
-│   └── ...
-├── install.sh          # one-click
-└── data/               # runtime (ключи, бинарник, БД)
-```
+## Security notes
 
-## Лицензия
+- Admin passwords are stored as a salted iterated SHA-256 hash, not plaintext.
+- Session cookies are HttpOnly and SameSite=Strict.
+- Panel state and private key material are written with `0600` permissions.
+- For internet-facing production use, put the panel behind HTTPS (Caddy/Nginx) or restrict its port at the firewall.
 
-MIT
+## Upstream
+
+Sudoku UI is not part of the SUDOKU-ASCII project. Sudoku core is installed from official SUDOKU-ASCII GitHub releases.
