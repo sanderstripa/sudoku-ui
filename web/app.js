@@ -33,7 +33,11 @@ async function boot(){
 }
 
 async function refreshState(){ state=await api('/api/state'); render(); }
-function render(){ renderConnections(); renderKeys(); }
+function render(){
+  $('#coreVersion').textContent=state.core_version||'неизвестна';
+  $('#panelVersion').textContent=state.panel_version||state.version||'неизвестна';
+  renderConnections(); renderKeys();
+}
 
 function renderConnections(){
   const body=$('#connectionsBody'); body.innerHTML=''; $('#connectionsEmpty').classList.toggle('hidden',state.connections.length>0);
@@ -108,7 +112,16 @@ async function paramsModal(id){
 
 function qrModal(id){ openModal(`<div class="modal-body"><h2>QR-код</h2><div class="qr-wrap"><img src="/api/keys/${id}/qr" alt="QR"></div><div class="modal-footer"><button class="btn primary" id="closeQR">Готово</button></div></div>`); $('#closeQR').onclick=closeModal; }
 async function logsModal(){ const x=await api('/api/logs'); openModal(`<div class="modal-body"><h2>Логи Sudoku</h2><pre class="logs">${escapeHtml(x.logs)}</pre><div class="modal-footer"><button class="btn" id="refreshLogs">Обновить</button><button class="btn primary" id="closeLogs">Закрыть</button></div></div>`,true); $('#closeLogs').onclick=closeModal; $('#refreshLogs').onclick=logsModal; }
-async function updateThing(url,label){ if(!confirm(`Проверить и установить последнюю версию: ${label}?`))return; toast('Проверяю обновление…'); try{await api(url,{method:'POST'});toast(`${label}: обновление завершено`);setTimeout(()=>location.reload(),1000)}catch(err){toast(err.message,true)} }
+async function updateThing(url,label){
+  if(!confirm(`Проверить последнюю версию: ${label}?`))return;
+  toast('Проверяю обновление…');
+  try{
+    const result=await api(url,{method:'POST'});
+    toast(result.message||`${label}: обновление завершено`);
+    if(result.updated){ setTimeout(()=>location.reload(),1200); }
+    else { await refreshState(); }
+  }catch(err){toast(err.message,true)}
+}
 
 async function refreshMetrics(){
   try{ const m=await api('/api/metrics'); updateMetric(m); }catch{}

@@ -36,12 +36,13 @@ var (
 )
 
 const (
-	appDir       = "/etc/sudoku-ui"
-	configPath   = appDir + "/config.json"
-	statePath    = appDir + "/state.json"
-	connDir      = appDir + "/connections"
-	sudokuBinary = "/usr/local/bin/sudoku"
-	panelBinary  = "/usr/local/bin/sudoku-ui"
+	appDir          = "/etc/sudoku-ui"
+	configPath      = appDir + "/config.json"
+	statePath       = appDir + "/state.json"
+	connDir         = appDir + "/connections"
+	coreVersionPath = appDir + "/core-version"
+	sudokuBinary    = "/usr/local/bin/sudoku"
+	panelBinary     = "/usr/local/bin/sudoku-ui"
 )
 
 //go:embed web/*
@@ -126,7 +127,7 @@ func main() {
 			}
 			return
 		case "--install-core":
-			if err := installLatestSudoku(); err != nil {
+			if _, _, err := installLatestSudoku(true); err != nil {
 				log.Fatal(err)
 			}
 			return
@@ -313,7 +314,13 @@ func (a *App) getState(w http.ResponseWriter, r *http.Request) {
 	for _, k := range st.Keys {
 		kv = append(kv, keyView{k.ID, k.Name, k.ConnectionID, k.CreatedAt})
 	}
-	jsonOut(w, map[string]any{"version": Version, "connections": views, "keys": kv})
+	jsonOut(w, map[string]any{
+		"version":       Version,
+		"panel_version": displayVersion(Version),
+		"core_version":  installedCoreVersion(),
+		"connections":   views,
+		"keys":          kv,
+	})
 }
 
 func (a *App) getMetrics(w http.ResponseWriter, r *http.Request) { jsonOut(w, a.metrics()) }
@@ -548,9 +555,18 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) getLogs(w http.ResponseWriter, r *http.Request) {
-	out, err := exec.Command("journalctl", "--no-pager", "-n", "250", "-u", "sudoku@*.service").CombinedOutput()
+	args := []string{"--no-pager", "-n", "250", "-u", "sudoku-ui.service"}
+	a.mu.Lock()
+	for _, c := range a.state.Connections {
+		args = append(args, "-u", "sudoku@"+c.ID+".service")
+	}
+	a.mu.Unlock()
+	out, err := exec.Command("journalctl", args...).CombinedOutput()
 	if err != nil && len(out) == 0 {
-		out = []byte(err.Error())
+		out = []byte("Не удалось прочитать журнал: " + err.Error())
+	}
+	if len(bytes.TrimSpace(out)) == 0 || strings.TrimSpace(string(out)) == "-- No entries --" {
+		out = []byte("Записей в журнале пока нет.")
 	}
 	jsonOut(w, map[string]any{"logs": string(out)})
 }
@@ -560,7 +576,8 @@ func (a *App) updateCore(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(405)
 		return
 	}
-	if err := installLatestSudoku(); err != nil {
+	version, updated, err := installLatestSudoku(false)
+	if err != nil {
 		jsonError(w, err.Error(), 500)
 		return
 	}
@@ -570,10 +587,16 @@ func (a *App) updateCore(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, c.ID)
 	}
 	a.mu.Unlock()
-	for _, id := range ids {
-		_ = run("systemctl", "restart", "sudoku@"+id)
+	if updated {
+		for _, id := range ids {
+			_ = run("systemctl", "restart", "sudoku@"+id)
+		}
 	}
-	jsonOut(w, map[string]any{"ok": true})
+	message := "Обновлений нет — установлена свежая версия " + version
+	if updated {
+		message = "Sudoku обновлён до " + version
+	}
+	jsonOut(w, map[string]any{"ok": true, "updated": updated, "version": version, "message": message})
 }
 
 func (a *App) updatePanel(w http.ResponseWriter, r *http.Request) {
@@ -589,11 +612,16 @@ func (a *App) updatePanel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Репозиторий панели не задан", 400)
 		return
 	}
-	if err := installReleaseBinary(repo, "sudoku-ui", panelBinary); err != nil {
+	version, updated, err := installReleaseBinary(repo, "sudoku-ui", panelBinary, Version)
+	if err != nil {
 		jsonError(w, err.Error(), 500)
 		return
 	}
-	jsonOut(w, map[string]any{"ok": true, "message": "Панель обновлена. Служба перезапустится."})
+	if !updated {
+		jsonOut(w, map[string]any{"ok": true, "updated": false, "version": version, "message": "Обновлений нет — установлена свежая версия " + displayVersion(Version)})
+		return
+	}
+	jsonOut(w, map[string]any{"ok": true, "updated": true, "version": version, "message": "Панель обновлена до " + version + ". Служба перезапустится."})
 	go func() { time.Sleep(500 * time.Millisecond); _ = run("systemctl", "restart", "sudoku-ui") }()
 }
 
@@ -620,23 +648,53 @@ func writeConnectionConfig(c Connection) error {
 }
 
 func generateMasterKeys() (string, string, string, error) {
-	out, err := exec.Command(sudokuBinary, "-keygen").CombinedOutput()
+	out, err := sudokuKeygen("-keygen")
 	if err != nil {
-		return "", "", "", fmt.Errorf("keygen: %s", out)
+		return "", "", "", err
 	}
 	s := string(out)
-	return field(s, "Available Private Key:"), field(s, "Master Private Key:"), field(s, "Master Public Key:"), nil
+	available := field(s, "Available Private Key:")
+	masterPrivate := field(s, "Master Private Key:")
+	masterPublic := field(s, "Master Public Key:")
+	if available == "" || masterPrivate == "" || masterPublic == "" {
+		return "", "", "", errors.New("Sudoku вернул неполный набор ключей")
+	}
+	return available, masterPrivate, masterPublic, nil
 }
 func generateSplitKey(master string) (string, error) {
-	out, err := exec.Command(sudokuBinary, "-keygen", "-more", master).CombinedOutput()
+	out, err := sudokuKeygen("-keygen", "-more", master)
 	if err != nil {
-		return "", fmt.Errorf("keygen: %s", out)
+		return "", err
 	}
 	v := field(string(out), "Split Private Key:")
 	if v == "" {
 		return "", errors.New("Sudoku не вернул Split Private Key")
 	}
 	return v, nil
+}
+
+func sudokuKeygen(args ...string) ([]byte, error) {
+	out, err := exec.Command(sudokuBinary, args...).CombinedOutput()
+	if err == nil {
+		return out, nil
+	}
+	firstErr := commandError("keygen", err, out)
+	if _, _, installErr := installLatestSudoku(true); installErr != nil {
+		return nil, fmt.Errorf("%v; автоматическое восстановление Sudoku не удалось: %w", firstErr, installErr)
+	}
+	out, err = exec.Command(sudokuBinary, args...).CombinedOutput()
+	if err != nil {
+		return nil, commandError("keygen после восстановления", err, out)
+	}
+	return out, nil
+}
+
+func commandError(action string, err error, out []byte) error {
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		detail = err.Error()
+	}
+	return fmt.Errorf("%s: %s", action, detail)
 }
 func field(s, prefix string) string {
 	for _, l := range strings.Split(s, "\n") {
@@ -757,20 +815,37 @@ func pct(used, total uint64) float64 {
 	return 100 * float64(used) / float64(total)
 }
 
-func installLatestSudoku() error {
-	return installReleaseBinary("SUDOKU-ASCII/sudoku", "sudoku", sudokuBinary)
+func installLatestSudoku(force bool) (string, bool, error) {
+	currentVersion := installedCoreVersion()
+	if force || currentVersion == "неизвестна" {
+		currentVersion = ""
+	}
+	version, updated, err := installReleaseBinary("SUDOKU-ASCII/sudoku", "sudoku", sudokuBinary, currentVersion)
+	if err != nil {
+		return "", false, err
+	}
+	if err := os.MkdirAll(appDir, 0700); err != nil {
+		return "", false, err
+	}
+	if err := os.WriteFile(coreVersionPath, []byte(version+"\n"), 0600); err != nil {
+		return "", false, err
+	}
+	return version, updated, nil
 }
-func installReleaseBinary(repo, name, dst string) error {
+func installReleaseBinary(repo, name, dst, currentVersion string) (string, bool, error) {
 	api := "https://api.github.com/repos/" + repo + "/releases/latest"
 	req, _ := http.NewRequest("GET", api, nil)
 	req.Header.Set("User-Agent", "Sudoku-UI/"+Version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("GitHub API: %s", resp.Status)
+		if resp.StatusCode == http.StatusNotFound {
+			return "", false, errors.New("Для этого проекта ещё не опубликован ни один релиз")
+		}
+		return "", false, fmt.Errorf("GitHub API: %s", resp.Status)
 	}
 	var rel struct {
 		TagName string `json:"tag_name"`
@@ -780,7 +855,13 @@ func installReleaseBinary(repo, name, dst string) error {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return err
+		return "", false, err
+	}
+	if rel.TagName == "" {
+		return "", false, errors.New("GitHub вернул релиз без номера версии")
+	}
+	if currentVersion != "" && sameVersion(currentVersion, rel.TagName) {
+		return rel.TagName, false, nil
 	}
 	arch := runtime.GOARCH
 	tokens := []string{arch}
@@ -810,32 +891,38 @@ func installReleaseBinary(repo, name, dst string) error {
 		break
 	}
 	if url == "" {
-		return fmt.Errorf("Не найден Linux asset для %s/%s", repo, arch)
+		return "", false, fmt.Errorf("Не найден Linux asset для %s/%s", repo, arch)
 	}
 	tmp, err := os.MkdirTemp("", "sudoku-update-")
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	defer os.RemoveAll(tmp)
 	pkg := filepath.Join(tmp, asset)
 	if err := download(url, pkg); err != nil {
-		return err
+		return "", false, err
 	}
 	bin, err := extractBinary(pkg, tmp, name)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if err := os.Chmod(bin, 0755); err != nil {
-		return err
+		return "", false, err
+	}
+	if err := validateReleaseBinary(name, bin); err != nil {
+		return "", false, err
 	}
 	backup := dst + ".bak"
 	if _, err := os.Stat(dst); err == nil {
 		_ = copyFile(dst, backup)
 	}
 	if err := copyFile(bin, dst); err != nil {
-		return err
+		return "", false, err
 	}
-	return os.Chmod(dst, 0755)
+	if err := os.Chmod(dst, 0755); err != nil {
+		return "", false, err
+	}
+	return rel.TagName, true, nil
 }
 func download(url, dst string) error {
 	req, _ := http.NewRequest("GET", url, nil)
@@ -883,7 +970,15 @@ func extractBinary(pkg, tmp, name string) (string, error) {
 	}
 	var found string
 	filepath.WalkDir(tmp, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasPrefix(filepath.Base(path), name) && !strings.Contains(path, ".bak") {
+		if err != nil || d.IsDir() || filepath.Clean(path) == filepath.Clean(pkg) || strings.Contains(path, ".bak") {
+			return nil
+		}
+		base := filepath.Base(path)
+		if base == name {
+			found = path
+			return nil
+		}
+		if found == "" && strings.HasPrefix(base, name) {
 			found = path
 		}
 		return nil
@@ -895,6 +990,45 @@ func extractBinary(pkg, tmp, name string) (string, error) {
 		return pkg, nil
 	}
 	return "", errors.New("binary not found in release asset")
+}
+
+func validateReleaseBinary(name, path string) error {
+	args := []string{"--version"}
+	if name == "sudoku" {
+		args = []string{"-keygen"}
+	}
+	out, err := exec.Command(path, args...).CombinedOutput()
+	if err != nil {
+		return commandError("проверка скачанного "+name, err, out)
+	}
+	if name == "sudoku" && (field(string(out), "Master Private Key:") == "" || field(string(out), "Master Public Key:") == "") {
+		return errors.New("скачанный Sudoku не прошёл проверку keygen")
+	}
+	return nil
+}
+
+func sameVersion(a, b string) bool {
+	normalize := func(v string) string { return strings.TrimPrefix(strings.TrimSpace(v), "v") }
+	return normalize(a) == normalize(b)
+}
+
+func displayVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "неизвестна"
+	}
+	if strings.HasPrefix(v, "v") {
+		return v
+	}
+	return "v" + v
+}
+
+func installedCoreVersion() string {
+	b, err := os.ReadFile(coreVersionPath)
+	if err != nil || strings.TrimSpace(string(b)) == "" {
+		return "неизвестна"
+	}
+	return displayVersion(string(b))
 }
 
 func serviceActive(id string) bool {
