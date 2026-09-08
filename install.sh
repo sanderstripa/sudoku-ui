@@ -27,7 +27,7 @@ SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
 cp -a "$SRC"/. "$INSTALL_DIR"/
 
 cd "$INSTALL_DIR"
-VERSION="${SUDOKU_UI_VERSION:-v0.1.1}"
+VERSION="${SUDOKU_UI_VERSION:-v0.1.2}"
 go build -trimpath -ldflags "-s -w -X main.Version=${VERSION} -X main.PanelRepo=${REPO}" -o "$BIN" .
 chmod 755 "$BIN"
 

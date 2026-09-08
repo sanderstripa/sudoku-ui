@@ -24,9 +24,8 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -trimpath -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui .
-          tar -czf sudoku-ui-${{ matrix.suffix }}.tar.gz sudoku-ui
+          go build -trimpath -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui-${{ matrix.suffix }} .
       - uses: softprops/action-gh-release@v2
         with:
-          files: sudoku-ui-${{ matrix.suffix }}.tar.gz
+          files: sudoku-ui-${{ matrix.suffix }}
           generate_release_notes: true
