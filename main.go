@@ -86,6 +86,7 @@ type AccessKey struct {
 	Name         string `json:"name"`
 	ConnectionID string `json:"connection_id"`
 	PrivateKey   string `json:"private_key"`
+	ShareToken   string `json:"share_token,omitempty"`
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -224,6 +225,18 @@ func loadApp() (*App, error) {
 	if err := readJSON(statePath, &st); err != nil {
 		return nil, fmt.Errorf("read state: %w", err)
 	}
+	migrated := false
+	for i := range st.Keys {
+		if st.Keys[i].ShareToken == "" {
+			st.Keys[i].ShareToken = randomHex(16)
+			migrated = true
+		}
+	}
+	if migrated {
+		if err := writeJSON(statePath, st, 0600); err != nil {
+			return nil, fmt.Errorf("migrate state: %w", err)
+		}
+	}
 	a := &App{cfg: cfg, state: st, sessions: map[string]session{}, logins: map[string][]time.Time{}}
 	a.cpuLast = readCPU()
 	a.netLast = readNet()
@@ -233,7 +246,7 @@ func loadApp() (*App, error) {
 func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", a.login)
-	mux.HandleFunc("/api/logout", a.auth(a.logout))
+	mux.HandleFunc("/api/logout", a.logout)
 	mux.HandleFunc("/api/state", a.auth(a.getState))
 	mux.HandleFunc("/api/metrics", a.auth(a.getMetrics))
 	mux.HandleFunc("/api/logs", a.auth(a.getLogs))
@@ -244,6 +257,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/update/core", a.auth(a.updateCore))
 	mux.HandleFunc("/api/update/panel", a.auth(a.updatePanel))
 	mux.HandleFunc("/api/updates", a.auth(a.getUpdates))
+	mux.HandleFunc("/sub/", a.subscription)
 	sub, _ := fs.Sub(webFS, "web")
 	fileServer := http.FileServer(http.FS(sub))
 	mux.Handle("/", fileServer)
@@ -348,6 +362,10 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, map[string]any{"ok": true, "csrf": csrf})
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	if c, err := r.Cookie("sudoku_session"); err == nil {
 		a.mu.Lock()
 		delete(a.sessions, c.Value)
@@ -573,7 +591,7 @@ func (a *App) keys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, CreatedAt: time.Now().Format(time.RFC3339)}
+	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, ShareToken: randomHex(16), CreatedAt: time.Now().Format(time.RFC3339)}
 	a.mu.Lock()
 	if connectionIndex >= 0 && a.state.Connections[connectionIndex].AvailablePrivate == priv {
 		a.state.Connections[connectionIndex].AvailablePrivate = ""
@@ -663,9 +681,9 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 	case "params":
 		jsonOut(w, params)
 	case "link":
-		jsonOut(w, map[string]any{"link": shortLink(params)})
+		jsonOut(w, map[string]any{"link": a.subscriptionURL(r, *k), "sudoku_link": shortLink(params)})
 	case "qr":
-		link := shortLink(params)
+		link := a.subscriptionURL(r, *k)
 		cmd := exec.Command("qrencode", "-o", "-", "-t", "PNG", "-s", "7", "-m", "2", link)
 		out, err := cmd.Output()
 		if err != nil {
@@ -674,9 +692,56 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(out)
+	case "clash.yaml":
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="sudoku-`+id+`.yaml"`)
+		_, _ = io.WriteString(w, clashYAML(*c, *k, host))
 	default:
 		jsonError(w, "not found", 404)
 	}
+}
+
+func (a *App) subscriptionURL(r *http.Request, k AccessKey) string {
+	scheme := "http"
+	if requestIsHTTPS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + strings.TrimSuffix(a.cfg.PublicPath, "/") + "/sub/" + k.ShareToken + ".yaml"
+}
+
+func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sub/"), ".yaml")
+	a.mu.Lock()
+	var key *AccessKey
+	var conn *Connection
+	for i := range a.state.Keys {
+		if subtle.ConstantTimeCompare([]byte(a.state.Keys[i].ShareToken), []byte(token)) == 1 {
+			k := a.state.Keys[i]
+			key = &k
+			break
+		}
+	}
+	if key != nil {
+		for i := range a.state.Connections {
+			if a.state.Connections[i].ID == key.ConnectionID {
+				c := a.state.Connections[i]
+				conn = &c
+				break
+			}
+		}
+	}
+	a.mu.Unlock()
+	if key == nil || conn == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, clashYAML(*conn, *key, publicHost(r)))
 }
 
 func (a *App) getLogs(w http.ResponseWriter, r *http.Request) {
@@ -778,12 +843,29 @@ func clientParams(c Connection, k AccessKey, host string) map[string]any {
 
 // Compatible with the compact sudoku:// format used by the official easy-install/client family.
 func shortLink(p map[string]any) string {
-	obj := map[string]any{"h": p["server"], "p": p["port"], "k": p["key"], "a": p["table_type"], "e": p["aead"], "m": 10233, "x": !p["pure_downlink"].(bool), "hd": !p["http_mask"].(bool), "hm": p["http_mode"], "mx": p["multiplex"], "hx": "off", "hy": ""}
+	ascii := p["table_type"]
+	if ascii == "prefer_ascii" {
+		ascii = "ascii"
+	} else if ascii == "prefer_entropy" {
+		ascii = "entropy"
+	}
+	obj := map[string]any{"h": p["server"], "p": p["port"], "k": p["key"], "a": ascii, "e": p["aead"], "m": 1080, "x": !p["pure_downlink"].(bool), "hd": !p["http_mask"].(bool), "hm": p["http_mode"], "hx": p["multiplex"], "hy": ""}
 	if t, ok := p["custom_table"].(string); ok && t != "" {
 		obj["t"] = t
 	}
 	b, _ := json.Marshal(obj)
 	return "sudoku://" + base64.RawURLEncoding.EncodeToString(b)
+}
+
+func clashYAML(c Connection, k AccessKey, host string) string {
+	name := k.Name
+	if strings.TrimSpace(name) == "" {
+		name = "Sudoku"
+	}
+	q := strconv.Quote
+	var b strings.Builder
+	fmt.Fprintf(&b, "mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: info\nproxies:\n  - name: %s\n    type: sudoku\n    server: %s\n    port: %d\n    key: %s\n    aead-method: %s\n    padding-min: %d\n    padding-max: %d\n    table-type: %s\n    multiplex: %s\n    httpmask:\n      disable: %t\n      mode: %s\n      tls: false\n      host: \"\"\n      path-root: \"\"\n    enable-pure-downlink: %t\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - %s\nrules:\n  - MATCH,PROXY\n", q(name), q(host), c.Port, q(k.PrivateKey), c.AEAD, c.PaddingMin, c.PaddingMax, c.TableType, c.Multiplex, !c.HTTPMask, c.HTTPMode, c.PureDownlink, q(name))
+	return b.String()
 }
 
 func writeConnectionConfig(c Connection) error {

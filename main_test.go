@@ -17,7 +17,7 @@ func TestFieldParsesKeygenOutput(t *testing.T) {
 }
 
 func TestShortLinkIsDecodable(t *testing.T) {
-	p := map[string]any{"server": "203.0.113.1", "port": 50001, "key": "private", "aead": "chacha20-poly1305", "table_type": "up_ascii_down_entropy", "custom_table": "", "pure_downlink": false, "http_mask": false}
+	p := map[string]any{"server": "203.0.113.1", "port": 50001, "key": "private", "aead": "chacha20-poly1305", "table_type": "prefer_entropy", "custom_table": "", "pure_downlink": false, "http_mask": false, "http_mode": "auto", "multiplex": "off"}
 	link := shortLink(p)
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(link, "sudoku://"))
 	if err != nil {
@@ -29,6 +29,20 @@ func TestShortLinkIsDecodable(t *testing.T) {
 	}
 	if decoded["h"] != p["server"] || decoded["k"] != p["key"] {
 		t.Fatalf("unexpected payload: %#v", decoded)
+	}
+	if decoded["a"] != "entropy" || decoded["hx"] != "off" {
+		t.Fatalf("link is not compatible with the official codec: %#v", decoded)
+	}
+}
+
+func TestClashYAMLContainsSudokuNode(t *testing.T) {
+	c := Connection{Port: 50001, AEAD: "chacha20-poly1305", TableType: "up_ascii_down_entropy", PaddingMin: 2, PaddingMax: 7, Multiplex: "off", HTTPMode: "auto"}
+	k := AccessKey{Name: "iPhone", PrivateKey: "client-key"}
+	yaml := clashYAML(c, k, "203.0.113.1")
+	for _, want := range []string{"type: sudoku", "server: \"203.0.113.1\"", "key: \"client-key\"", "MATCH,PROXY"} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("missing %q in YAML:\n%s", want, yaml)
+		}
 	}
 }
 
