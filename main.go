@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -777,9 +778,9 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 	case "params":
 		jsonOut(w, params)
 	case "link":
-		jsonOut(w, map[string]any{"link": shortLink(params), "sudoku_link": shortLink(params), "subscription_link": a.subscriptionURL(r, *k)})
+		jsonOut(w, map[string]any{"link": a.subscriptionURL(r, *k), "sudoku_link": shortLink(params), "subscription_link": a.subscriptionURL(r, *k)})
 	case "qr":
-		link := shortLink(params)
+		link := a.subscriptionURL(r, *k)
 		cmd := exec.Command("qrencode", "-o", "-", "-t", "PNG", "-s", "7", "-m", "2", link)
 		out, err := cmd.Output()
 		if err != nil {
@@ -1517,10 +1518,20 @@ func displayVersion(v string) string {
 
 func installedCoreVersion() string {
 	b, err := os.ReadFile(coreVersionPath)
-	if err != nil || strings.TrimSpace(string(b)) == "" {
-		return "неизвестна"
+	if err == nil && strings.TrimSpace(string(b)) != "" {
+		return displayVersion(string(b))
 	}
-	return displayVersion(string(b))
+	for _, args := range [][]string{{"--version"}, {"-version"}, {"version"}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		out, cmdErr := exec.CommandContext(ctx, sudokuBinary, args...).CombinedOutput()
+		cancel()
+		if cmdErr == nil {
+			if v := regexp.MustCompile(`v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?`).FindString(string(out)); v != "" {
+				return displayVersion(v)
+			}
+		}
+	}
+	return "unknown"
 }
 
 func serviceActive(id string) bool {

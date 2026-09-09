@@ -36,19 +36,29 @@ if [[ -e "$CORE_BIN" || -e /etc/sudoku || -e /etc/systemd/system/sudoku.service 
     1) INSTALL_CORE=0;;
     2) [[ -f "$CORE_BIN" ]] && cp -a "$CORE_BIN" "${CORE_BIN}.before-sudoku-ui";;
     3) :;;
-    4) read -r -p "Type DELETE / Введите DELETE: " confirm; [[ "$confirm" == DELETE ]] || exit 0; CLEAN_INSTALL=1;;
-    5) read -r -p "Type DELETE / Введите DELETE: " confirm; [[ "$confirm" == DELETE ]] || exit 0; systemctl disable --now sudoku-ui sudoku 2>/dev/null || true; rm -f /etc/systemd/system/sudoku-ui.service /etc/systemd/system/sudoku.service "$BIN" "$CORE_BIN"; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; nft delete table inet sudoku_ui 2>/dev/null || true; systemctl daemon-reload; echo "Sudoku UI removed / Sudoku UI удалена"; exit 0;;
+    4) read -r -p "Type DEL / Введите DEL: " confirm; [[ "${confirm^^}" == DEL ]] || exit 0; CLEAN_INSTALL=1;;
+    5) read -r -p "Type DEL / Введите DEL: " confirm; [[ "${confirm^^}" == DEL ]] || exit 0; systemctl disable --now sudoku-ui sudoku 2>/dev/null || true; rm -f /etc/systemd/system/sudoku-ui.service /etc/systemd/system/sudoku.service "$BIN" "$CORE_BIN"; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; nft delete table inet sudoku_ui 2>/dev/null || true; systemctl daemon-reload; echo "Sudoku UI removed / Sudoku UI удалена"; exit 0;;
     *) exit 0;;
   esac
 fi
 if [[ $CLEAN_INSTALL -eq 1 ]]; then systemctl disable --now sudoku-ui sudoku 2>/dev/null || true; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; fi
 install -m 755 "$TMP/sudoku-ui" "$BIN"
 if [[ $INSTALL_CORE -eq 1 ]]; then
+  CORE_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
   CORE_URL="$(release_asset "$CORE_REPO" "sudoku-linux-${ARCH}.tar.gz")"; [[ -n "$CORE_URL" ]] || die "Sudoku Core release asset not found"
   curl -fsSL "$CORE_URL" -o "$TMP/sudoku.tar.gz"; tar -xzf "$TMP/sudoku.tar.gz" -C "$TMP" sudoku; chmod 755 "$TMP/sudoku"
   "$TMP/sudoku" -keygen | grep -q 'Master Public Key:' || die "Sudoku Core keygen check failed"; install -m 755 "$TMP/sudoku" "$CORE_BIN"
 fi
 mkdir -p /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui /var/backups/sudoku-ui; chmod 700 /etc/sudoku-ui /etc/sudoku
+[[ -n "${CORE_VERSION:-}" ]] && printf '%s\n' "$CORE_VERSION" >/etc/sudoku-ui/core-version
+if [[ ! -s /etc/sudoku-ui/core-version && -x "$CORE_BIN" ]]; then
+  DETECT_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
+  DETECT_URL="$(release_asset "$CORE_REPO" "sudoku-linux-${ARCH}.tar.gz")"
+  if [[ -n "$DETECT_VERSION" && -n "$DETECT_URL" ]]; then
+    mkdir -p "$TMP/detect"; curl -fsSL "$DETECT_URL" -o "$TMP/detect/core.tar.gz"; tar -xzf "$TMP/detect/core.tar.gz" -C "$TMP/detect" sudoku
+    [[ "$(sha256sum "$CORE_BIN" | awk '{print $1}')" == "$(sha256sum "$TMP/detect/sudoku" | awk '{print $1}')" ]] && printf '%s\n' "$DETECT_VERSION" >/etc/sudoku-ui/core-version
+  fi
+fi
 cat >/etc/systemd/system/sudoku-ui.service <<'UNIT'
 [Unit]
 Description=Sudoku UI
