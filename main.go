@@ -443,12 +443,16 @@ func (a *App) connections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Name                   string `json:"name"`
-		Port                   int    `json:"port"`
-		AEAD, TableType        string
-		PaddingMin, PaddingMax int
-		PureDownlink, HTTPMask bool
-		HTTPMode, Multiplex    string
+		Name         string `json:"name"`
+		Port         int    `json:"port"`
+		AEAD         string `json:"aead"`
+		TableType    string `json:"table_type"`
+		PaddingMin   int    `json:"padding_min"`
+		PaddingMax   int    `json:"padding_max"`
+		PureDownlink bool   `json:"pure_downlink"`
+		HTTPMask     bool   `json:"http_mask"`
+		HTTPMode     string `json:"http_mode"`
+		Multiplex    string `json:"multiplex"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		jsonError(w, "invalid request", 400)
