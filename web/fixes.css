@@ -1,0 +1,40 @@
+.modal {
+  overflow-x: hidden;
+}
+
+.param-row {
+  grid-template-columns: 160px minmax(0, 1fr) auto;
+}
+
+.param-row > * {
+  min-width: 0;
+}
+
+.param-row code {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+@media (max-width: 620px) {
+  .backdrop {
+    padding: 10px;
+  }
+
+  .modal {
+    padding: 24px 18px;
+  }
+
+  .param-row {
+    grid-template-columns: 1fr;
+    gap: 7px;
+    padding: 14px 0;
+  }
+
+  .param-row button {
+    width: 100%;
+  }
+}
