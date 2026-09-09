@@ -111,6 +111,15 @@ ACME=/root/.acme.sh/acme.sh; [[ -x "$ACME" ]] || curl -fsSL https://get.acme.sh 
 CERT_DIR=/etc/sudoku-ui/tls; mkdir -p "$CERT_DIR"; "$ACME" --set-default-ca --server letsencrypt --force >/dev/null
 if [[ -s "$TMP/preserved-tls/fullchain.pem" && -s "$TMP/preserved-tls/privkey.pem" ]]; then cp -a "$TMP/preserved-tls/fullchain.pem" "$CERT_DIR/fullchain.pem"; cp -a "$TMP/preserved-tls/privkey.pem" "$CERT_DIR/privkey.pem"; fi
 if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
+  for ACME_DOMAIN_DIR in /root/.acme.sh/"$IP" /root/.acme.sh/"${IP}_ecc" /root/.acme.sh/"$IP"_*; do
+    [[ -d "$ACME_DOMAIN_DIR" ]] || continue
+    ACME_CERT=""; ACME_KEY=""
+    for candidate in "$ACME_DOMAIN_DIR/fullchain.cer" "$ACME_DOMAIN_DIR/${IP}.cer"; do [[ -s "$candidate" ]] && ACME_CERT="$candidate" && break; done
+    for candidate in "$ACME_DOMAIN_DIR/${IP}.key" "$ACME_DOMAIN_DIR/domain.key"; do [[ -s "$candidate" ]] && ACME_KEY="$candidate" && break; done
+    if [[ -n "$ACME_CERT" && -n "$ACME_KEY" ]] && openssl x509 -checkend 3600 -noout -in "$ACME_CERT" >/dev/null 2>&1; then cp -a "$ACME_CERT" "$CERT_DIR/fullchain.pem"; cp -a "$ACME_KEY" "$CERT_DIR/privkey.pem"; break; fi
+  done
+fi
+if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
   "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null 2>&1 || true
 fi
 if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
