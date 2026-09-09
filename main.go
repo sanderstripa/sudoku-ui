@@ -333,7 +333,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	a.sessions[token] = session{Expires: time.Now().Add(24 * time.Hour), CSRF: csrf}
 	delete(a.logins, ip)
 	a.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "sudoku_session", Value: token, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+	http.SetCookie(w, &http.Cookie{Name: "sudoku_session", Value: token, Path: "/", HttpOnly: true, Secure: requestIsHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: 86400})
 	jsonOut(w, map[string]any{"ok": true, "csrf": csrf})
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
@@ -1328,11 +1328,18 @@ func verifyPassword(password string, cfg AppConfig) bool {
 }
 
 func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
+		return forwarded
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (a *App) sessionCSRF(r *http.Request) string {
