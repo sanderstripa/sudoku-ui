@@ -41,7 +41,13 @@ if [[ -e "$CORE_BIN" || -e /etc/sudoku || -e /etc/systemd/system/sudoku.service 
     *) exit 0;;
   esac
 fi
-if [[ $CLEAN_INSTALL -eq 1 ]]; then systemctl disable --now sudoku-ui sudoku 2>/dev/null || true; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; fi
+if [[ $CLEAN_INSTALL -eq 1 ]]; then
+  systemctl disable --now sudoku-ui sudoku 2>/dev/null || true
+  if [[ -s /etc/sudoku-ui/tls/fullchain.pem && -s /etc/sudoku-ui/tls/privkey.pem ]] && openssl x509 -checkend 3600 -noout -in /etc/sudoku-ui/tls/fullchain.pem >/dev/null 2>&1; then
+    mkdir -p "$TMP/preserved-tls"; cp -a /etc/sudoku-ui/tls/fullchain.pem /etc/sudoku-ui/tls/privkey.pem "$TMP/preserved-tls/"
+  fi
+  rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui
+fi
 install -m 755 "$TMP/sudoku-ui" "$BIN"
 if [[ $INSTALL_CORE -eq 1 ]]; then
   CORE_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
@@ -100,12 +106,18 @@ if [[ $CLEAN_INSTALL -eq 0 && -s /etc/sudoku-ui/config.json ]]; then
 fi
 PORT=""; for _ in $(seq 1 200); do C=$((20000 + RANDOM % 30000)); if ! ss -lnt "sport = :$C" 2>/dev/null | grep -q LISTEN; then PORT="$C"; break; fi; done; [[ -n "$PORT" ]] || die "no free panel port"
 IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"; [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "public IPv4 not found"
-ss -lnt 'sport = :80' 2>/dev/null | grep -q LISTEN && die "port 80 is busy; it is required briefly to issue the IP HTTPS certificate"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow 80/tcp >/dev/null; ufw allow "$PORT/tcp" >/dev/null; fi
 ACME=/root/.acme.sh/acme.sh; [[ -x "$ACME" ]] || curl -fsSL https://get.acme.sh | sh
 CERT_DIR=/etc/sudoku-ui/tls; mkdir -p "$CERT_DIR"; "$ACME" --set-default-ca --server letsencrypt --force >/dev/null
-"$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force || die "HTTPS certificate request failed; check external port 80"
-"$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null
+if [[ -s "$TMP/preserved-tls/fullchain.pem" && -s "$TMP/preserved-tls/privkey.pem" ]]; then cp -a "$TMP/preserved-tls/fullchain.pem" "$CERT_DIR/fullchain.pem"; cp -a "$TMP/preserved-tls/privkey.pem" "$CERT_DIR/privkey.pem"; fi
+if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
+  "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null 2>&1 || true
+fi
+if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
+  ss -lnt 'sport = :80' 2>/dev/null | grep -q LISTEN && die "port 80 is busy; it is required briefly to issue a new IP HTTPS certificate"
+  "$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force || die "HTTPS certificate could not be issued. If the message says rateLimited, wait until the retry-after time shown by Let's Encrypt and run this installer again"
+  "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null
+fi
 chmod 600 "$CERT_DIR/privkey.pem"; chmod 644 "$CERT_DIR/fullchain.pem"; "$ACME" --upgrade --auto-upgrade >/dev/null 2>&1 || true
 USERNAME="admin-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"; PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"; PUBLIC_PATH="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; PANEL_SUFFIX="/${PUBLIC_PATH}/"
 "$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen ":$PORT" --repo "$REPO" --path "$PUBLIC_PATH" --cert "$CERT_DIR/fullchain.pem" --key "$CERT_DIR/privkey.pem"
