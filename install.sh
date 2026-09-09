@@ -9,9 +9,8 @@ die(){ echo "Ошибка: $*" >&2; exit 1; }
 [[ ${ID:-} == ubuntu || ${ID:-} == debian ]] || die "поддерживаются Ubuntu и Debian"
 case "$(uname -m)" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) die "неподдерживаемая архитектура $(uname -m)";; esac
 export DEBIAN_FRONTEND=noninteractive
-CADDY_WAS_PRESENT=0; command -v caddy >/dev/null 2>&1 && CADDY_WAS_PRESENT=1
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl jq qrencode tar iproute2 caddy >/dev/null
+apt-get install -y -qq ca-certificates curl jq qrencode tar iproute2 cron openssl >/dev/null
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 release_asset(){ curl -fsSL "https://api.github.com/repos/$1/releases/latest" | jq -r --arg n "$2" '.assets[]|select(.name==$n)|.browser_download_url' | head -n1; }
 
@@ -84,23 +83,41 @@ PORT=""; for _ in $(seq 1 200); do C=$((20000 + RANDOM % 30000)); if ! ss -lnt "
 [[ -n "$PORT" ]] || die "не удалось подобрать свободный порт панели"
 IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "не удалось определить публичный IPv4-адрес"
-DOMAIN="${IP//./-}.sslip.io"
+if [[ -f /etc/caddy/Caddyfile ]] && grep -q '^# Managed by Sudoku UI$' /etc/caddy/Caddyfile; then
+  systemctl disable --now caddy >/dev/null 2>&1 || true
+  apt-get remove -y -qq caddy >/dev/null 2>&1 || true
+fi
+if ss -lnt 'sport = :80' 2>/dev/null | grep -q LISTEN; then
+  die "порт 80 занят; он должен быть свободен для получения HTTPS-сертификата на IP"
+fi
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow 80/tcp >/dev/null
+  ufw allow "$PORT/tcp" >/dev/null
+fi
+ACME=/root/.acme.sh/acme.sh
+if [[ ! -x "$ACME" ]]; then
+  curl -fsSL https://get.acme.sh | sh
+fi
+CERT_DIR=/etc/sudoku-ui/tls
+mkdir -p "$CERT_DIR"
+"$ACME" --set-default-ca --server letsencrypt --force >/dev/null
+"$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force || die "не удалось получить HTTPS-сертификат для IP; проверьте внешний порт 80"
+"$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null || true
+[[ -s "$CERT_DIR/privkey.pem" && -s "$CERT_DIR/fullchain.pem" ]] || die "файлы HTTPS-сертификата не созданы"
+chmod 600 "$CERT_DIR/privkey.pem"; chmod 644 "$CERT_DIR/fullchain.pem"
+"$ACME" --upgrade --auto-upgrade >/dev/null 2>&1 || true
 USERNAME="admin-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 PUBLIC_PATH="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-PANEL_SUFFIX="/"
-if [[ "$PANEL_VERSION" == v0.1.* || "$PANEL_VERSION" == 0.1.* ]]; then
-  "$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen "127.0.0.1:$PORT" --repo "$REPO"
-else
-  "$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen "127.0.0.1:$PORT" --repo "$REPO" --path "$PUBLIC_PATH"
-  PANEL_SUFFIX="/${PUBLIC_PATH}/"
-fi
+[[ "$PANEL_VERSION" != v0.1.* && "$PANEL_VERSION" != 0.1.* ]] || die "для HTTPS на IP требуется Sudoku UI v0.2.0 или новее"
+PANEL_SUFFIX="/${PUBLIC_PATH}/"
+"$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen ":$PORT" --repo "$REPO" --path "$PUBLIC_PATH" --cert "$CERT_DIR/fullchain.pem" --key "$CERT_DIR/privkey.pem"
 systemctl daemon-reload
 systemctl enable sudoku-ui >/dev/null
 systemctl restart sudoku-ui
 PANEL_READY=0
 for _ in $(seq 1 30); do
-  if curl -fsS --max-time 2 "http://127.0.0.1:${PORT}${PANEL_SUFFIX}" >/dev/null 2>&1; then
+  if curl -fsS --max-time 3 --resolve "${IP}:${PORT}:127.0.0.1" "https://${IP}:${PORT}${PANEL_SUFFIX}" >/dev/null 2>&1; then
     PANEL_READY=1
     break
   fi
@@ -111,37 +128,7 @@ if [[ $PANEL_READY -ne 1 ]]; then
   journalctl -u sudoku-ui.service --no-pager -n 30 >&2 || true
   die "панель не отвечает на локальном порту ${PORT}"
 fi
-if [[ $CADDY_WAS_PRESENT -eq 1 && -s /etc/caddy/Caddyfile ]] && ! grep -q '^# Managed by Sudoku UI$' /etc/caddy/Caddyfile; then
-  die "Caddy уже настроен другим приложением; автоматическая HTTPS-настройка не будет перезаписана"
-fi
-cat >/etc/caddy/Caddyfile <<CADDY
-# Managed by Sudoku UI
-${DOMAIN} {
-  encode zstd gzip
-  reverse_proxy 127.0.0.1:${PORT}
-}
-CADDY
-caddy validate --config /etc/caddy/Caddyfile >/dev/null || die "ошибка конфигурации HTTPS"
-systemctl enable caddy >/dev/null
-systemctl restart caddy
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  ufw allow 80/tcp >/dev/null
-  ufw allow 443/tcp >/dev/null
-fi
-HTTPS_READY=0
-for _ in $(seq 1 60); do
-  if curl -fsS --max-time 3 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}${PANEL_SUFFIX}" >/dev/null 2>&1; then
-    HTTPS_READY=1
-    break
-  fi
-  sleep 1
-done
-if [[ $HTTPS_READY -ne 1 ]]; then
-  echo "HTTPS не запустился. Последние строки журнала:" >&2
-  journalctl -u caddy.service --no-pager -n 40 >&2 || true
-  die "не удалось получить HTTPS-сертификат; внешние порты 80 и 443 должны быть открыты"
-fi
 echo; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo
-echo "Sudoku UI успешно установлен"; echo; echo "Панель:"; echo "https://${DOMAIN}${PANEL_SUFFIX}"
+echo "Sudoku UI успешно установлен"; echo; echo "Панель:"; echo "https://${IP}:${PORT}${PANEL_SUFFIX}"
 echo; echo "Логин:"; echo "$USERNAME"; echo; echo "Пароль:"; echo "$PASSWORD"
 echo; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

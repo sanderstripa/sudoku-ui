@@ -57,6 +57,8 @@ type AppConfig struct {
 	Listen     string `json:"listen"`
 	Repo       string `json:"repo,omitempty"`
 	PublicPath string `json:"public_path,omitempty"`
+	CertFile   string `json:"cert_file,omitempty"`
+	KeyFile    string `json:"key_file,omitempty"`
 }
 
 type Connection struct {
@@ -154,11 +156,14 @@ func main() {
 	}
 	log.Printf("Sudoku UI %s listening on %s", Version, app.cfg.Listen)
 	srv := &http.Server{Addr: app.cfg.Listen, Handler: app.routes(), ReadHeaderTimeout: 10 * time.Second}
+	if app.cfg.CertFile != "" && app.cfg.KeyFile != "" {
+		log.Fatal(srv.ListenAndServeTLS(app.cfg.CertFile, app.cfg.KeyFile))
+	}
 	log.Fatal(srv.ListenAndServe())
 }
 
 func initConfig(args []string) error {
-	var username, password, listen, repo, publicPath string
+	var username, password, listen, repo, publicPath, certFile, keyFile string
 	listen = ":2095"
 	for i := 0; i < len(args); i++ {
 		if i+1 >= len(args) {
@@ -180,6 +185,12 @@ func initConfig(args []string) error {
 		case "--path":
 			publicPath = "/" + strings.Trim(args[i+1], "/")
 			i++
+		case "--cert":
+			certFile = args[i+1]
+			i++
+		case "--key":
+			keyFile = args[i+1]
+			i++
 		}
 	}
 	if username == "" || password == "" {
@@ -192,7 +203,7 @@ func initConfig(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg := AppConfig{Username: username, PassHash: string(hash), Listen: listen, Repo: repo, PublicPath: publicPath}
+	cfg := AppConfig{Username: username, PassHash: string(hash), Listen: listen, Repo: repo, PublicPath: publicPath, CertFile: certFile, KeyFile: keyFile}
 	if err := writeJSON(configPath, cfg, 0600); err != nil {
 		return err
 	}
