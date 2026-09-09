@@ -370,7 +370,7 @@ func (a *App) connections(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), 500)
 		return
 	}
-	c := Connection{ID: randomID(), Name: in.Name, Port: in.Port, AEAD: in.AEAD, TableType: in.TableType, CustomTable: randomTable(), PaddingMin: in.PaddingMin, PaddingMax: in.PaddingMax, PureDownlink: in.PureDownlink, HTTPMask: in.HTTPMask, MasterPrivate: masterPriv, MasterPublic: masterPub, FallbackAddress: "127.0.0.1:80", CreatedAt: time.Now().Format(time.RFC3339)}
+	c := Connection{ID: randomID(), Name: in.Name, Port: in.Port, AEAD: in.AEAD, TableType: in.TableType, PaddingMin: in.PaddingMin, PaddingMax: in.PaddingMax, PureDownlink: in.PureDownlink, HTTPMask: in.HTTPMask, MasterPrivate: masterPriv, MasterPublic: masterPub, FallbackAddress: "127.0.0.1:80", CreatedAt: time.Now().Format(time.RFC3339)}
 	if err := writeConnectionConfig(c); err != nil {
 		jsonError(w, err.Error(), 500)
 		return
@@ -640,7 +640,29 @@ func shortLink(p map[string]any) string {
 }
 
 func writeConnectionConfig(c Connection) error {
-	cfg := map[string]any{"mode": "server", "local_port": c.Port, "fallback_address": c.FallbackAddress, "key": c.MasterPublic, "aead": c.AEAD, "suspicious_action": "fallback", "ascii": c.TableType, "padding_min": c.PaddingMin, "padding_max": c.PaddingMax, "enable_pure_downlink": c.PureDownlink, "disable_http_mask": !c.HTTPMask}
+	cfg := map[string]any{
+		"mode":                 "server",
+		"transport":            "tcp",
+		"local_port":           c.Port,
+		"fallback_address":     c.FallbackAddress,
+		"key":                  c.MasterPublic,
+		"aead":                 c.AEAD,
+		"suspicious_action":    "fallback",
+		"ascii":                c.TableType,
+		"padding_min":          c.PaddingMin,
+		"padding_max":          c.PaddingMax,
+		"enable_pure_downlink": c.PureDownlink,
+		"multiplex":            "off",
+		"custom_tables":        []string{},
+		"httpmask": map[string]any{
+			"disable":   !c.HTTPMask,
+			"mode":      "auto",
+			"tls":       false,
+			"host":      "",
+			"path_root": "",
+		},
+		"reverse": map[string]any{"listen": ""},
+	}
 	if c.CustomTable != "" {
 		cfg["custom_table"] = c.CustomTable
 	}
