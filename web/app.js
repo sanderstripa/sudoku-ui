@@ -1,143 +1,38 @@
-const $ = (s, root=document) => root.querySelector(s);
-const $$ = (s, root=document) => [...root.querySelectorAll(s)];
-let state = {connections:[], keys:[], version:''};
-let histories = {cpu:[], memory:[], disk:[], rx:[], tx:[]};
-
-const api = async (url, options={}) => {
-  const o = {...options, headers:{'Content-Type':'application/json', ...(options.headers||{})}};
-  const r = await fetch(url, o);
-  let data = null; try { data = await r.json(); } catch {}
-  if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
-  if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
-  return data;
-};
-
-function showLogin(){ $('#app').classList.add('hidden'); $('#loginView').classList.remove('hidden'); }
-function showApp(){ $('#loginView').classList.add('hidden'); $('#app').classList.remove('hidden'); }
-function toast(msg, error=false){ const t=$('#toast'); t.textContent=msg; t.className='toast'+(error?' error':''); setTimeout(()=>t.classList.add('hidden'),3200); }
-function escapeHtml(s=''){ return String(s).replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function fmtDate(s){ if(!s)return '—'; const d=new Date(s); return d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
-function bytes(n){ if(!Number.isFinite(n)) return '—'; const u=['B','KB','MB','GB','TB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++} return `${v.toFixed(v>=100?0:v>=10?1:2)} ${u[i]}`; }
-function rate(n){ return bytes(n)+'/s'; }
-function connName(id){ return state.connections.find(c=>c.id===id)?.name || '—'; }
-
-$('#loginForm').addEventListener('submit', async e=>{
-  e.preventDefault(); $('#loginError').textContent='';
-  try { await api('/api/login',{method:'POST',body:JSON.stringify({Username:$('#loginUser').value,Password:$('#loginPass').value})}); await boot(); }
-  catch(err){ if(err.message!=='unauthorized') $('#loginError').textContent=err.message; }
-});
-
-async function boot(){
-  try{ state=await api('/api/state'); showApp(); render(); await refreshMetrics(); }
-  catch(err){ if(err.message!=='unauthorized') toast(err.message,true); }
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];let state={connections:[],keys:[]},selectedKey=null,logTimer=null;
+const BASE=location.pathname.replace(/[^/]*$/,'').replace(/\/$/,'');
+const api=async(url,o={})=>{const r=await fetch(BASE+url,{...o,headers:{'Content-Type':'application/json',...(state.csrf?{'X-CSRF-Token':state.csrf}:{}),...(o.headers||{})}});let d={};try{d=await r.json()}catch{}if(r.status===401){showLogin();throw Error('unauthorized')}if(!r.ok)throw Error(d.error||`HTTP ${r.status}`);return d};
+const esc=(s='')=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function toast(s,e=false){const t=$('#toast');t.textContent=s;t.className='toast'+(e?' error':'');setTimeout(()=>t.classList.add('hidden'),4200)}
+function showLogin(){$('#app').classList.add('hidden');$('#loginView').classList.remove('hidden')}function showApp(){$('#loginView').classList.add('hidden');$('#app').classList.remove('hidden')}
+function help(k){return `<button type="button" class="help" data-help="${k}">?</button>`}function label(t,k){return `<div class="label-row"><label>${t}</label>${help(k)}</div>`}
+function connectionForm(){const p=state.suggested_port||50001;return `<form id="connectionForm"><div class="form-grid"><div class="field">${label('Название','name')}<input name="name" value="Main" required></div><div class="field">${label('Порт','port')}<input name="port" type="number" min="1" max="65535" value="${p}" required></div><div class="field">${label('Метод шифрования','aead')}<select name="aead"><option value="chacha20-poly1305">ChaCha20-Poly1305</option><option value="aes-128-gcm">AES-128-GCM</option><option value="none">None — без AEAD</option></select></div><div class="field">${label('Тип таблицы','table')}<select name="table"><option value="up_ascii_down_entropy">Отправка ASCII / загрузка Low Entropy</option><option value="prefer_entropy">Низкая энтропия</option><option value="prefer_ascii">ASCII</option><option value="up_entropy_down_ascii">Отправка Low Entropy / загрузка ASCII</option></select></div><div class="field full">${label('Padding','padding')}<div class="toggle-row"><input name="pmin" type="number" min="0" max="100" value="2" aria-label="Минимум"><input name="pmax" type="number" min="0" max="100" value="7" aria-label="Максимум"></div></div><div class="field full"><div class="toggle-row"><label class="toggle"><input name="pure" type="checkbox">Pure Downlink ${help('pure')}</label><label class="toggle"><input name="http" type="checkbox">HTTP-маскировка ${help('http')}</label></div></div><details class="field full advanced"><summary>Дополнительные параметры</summary><div class="form-grid"><div class="field">${label('Multiplex','multiplex')}<select name="multiplex"><option value="off">Выключено</option><option value="auto">Auto</option><option value="on">Включено</option></select></div><div class="field http-mode hidden">${label('Режим HTTP','httpMode')}<select name="httpMode"><option value="auto">Auto</option><option value="stream">Stream</option><option value="poll">Poll</option><option value="ws">WebSocket</option><option value="legacy">Legacy</option></select></div></div></details></div><div class="submit-row"><button class="primary" type="submit">Создать Sudoku</button></div></form>`}
+async function boot(){try{state=await api('/api/state');showApp();render();metrics()}catch(e){if(e.message!=='unauthorized')toast(e.message,true)}}
+function render(){const c=state.connections[0];$('#setupView').classList.toggle('hidden',!!c);$('#homeView').classList.toggle('hidden',!c);if(!c){$('#setupForm').innerHTML=connectionForm();bindConnectionForm();$('#serviceStatus').className='status off';$('#serviceStatus').textContent='● Не настроен';return}$('#serviceStatus').className='status '+(c.active?'':'error');$('#serviceStatus').textContent=c.active?'● Работает':'● Ошибка';$('#connectionName').textContent=c.name;$('#endpoint').textContent=`${location.hostname} : ${c.port}`;if(!selectedKey||!state.keys.some(k=>(k.ID||k.id)===selectedKey))selectedKey=state.keys[0]?.ID||state.keys[0]?.id||null;renderKeys();renderHero(c)}
+function bindConnectionForm(){const f=$('#connectionForm');f.http.onchange=()=>$('.http-mode',f).classList.toggle('hidden',!f.http.checked);f.onsubmit=async e=>{e.preventDefault();const d=new FormData(f);if(d.get('aead')==='none'&&!confirm('Шифрование Sudoku будет отключено. Продолжить только для тестирования?'))return;const min=+d.get('pmin'),max=+d.get('pmax');if(min<0||max>100||min>max)return toast('Padding: 0 ≤ минимум ≤ максимум ≤ 100',true);f.classList.add('loading');toast('Создаём ключи и запускаем Sudoku…');try{await api('/api/connections',{method:'POST',body:JSON.stringify({name:d.get('name'),port:+d.get('port'),AEAD:d.get('aead'),TableType:d.get('table'),PaddingMin:min,PaddingMax:max,PureDownlink:d.get('pure')==='on',HTTPMask:d.get('http')==='on',HTTPMode:d.get('httpMode'),Multiplex:d.get('multiplex')})});state=await api('/api/state');render();toast('Sudoku работает')}catch(x){toast(x.message,true);f.classList.remove('loading')}}}
+function renderKeys(){const list=$('#keysList');if(!state.keys.length){list.innerHTML='<p class="muted">Ключей доступа пока нет.</p>';return}list.innerHTML=state.keys.map(k=>{const id=k.ID||k.id,n=k.Name||k.name;return `<div class="key-row ${id===selectedKey?'selected':''}" data-select-key="${id}"><b>${esc(n)}</b><div class="key-actions"><button data-qr="${id}">QR</button><button data-key-menu="${id}">•••</button></div></div>`}).join('')}
+function renderHero(c){
+  const k=state.keys.find(x=>(x.ID||x.id)===selectedKey);
+  $('#selectedKeyText').textContent=k?'Ключ: '+(k.Name||k.name):'Ключей доступа пока нет';
+  $('#heroActions').innerHTML=k?'<button class="primary" data-qr="'+selectedKey+'">Показать QR</button><button data-copy="'+selectedKey+'">Скопировать ссылку</button>':'<button class="primary" data-action="new-key">＋ Создать первый ключ</button>';
+  $('#heroQR').innerHTML=k?'<img src="'+BASE+'/api/keys/'+selectedKey+'/qr" alt="QR">':'';
 }
-
-async function refreshState(){ state=await api('/api/state'); render(); }
-function render(){
-  $('#coreVersion').textContent=state.core_version||'неизвестна';
-  $('#panelVersion').textContent=state.panel_version||state.version||'неизвестна';
-  renderConnections(); renderKeys();
+function modal(html){$('#modalContent').innerHTML=html;$('#modalBackdrop').classList.remove('hidden')}function closeModal(){clearInterval(logTimer);$('#modalBackdrop').classList.add('hidden')}
+async function newKey(){
+  modal('<h2>Новый ключ</h2><form id="keyForm"><div class="field">'+label('Название','keyName')+'<input name="name" value="iPhone" required></div><div class="modal-actions"><button type="button" id="cancel">Отмена</button><button class="primary">Создать</button></div></form>');
+  $('#cancel').onclick=closeModal;
+  $('#keyForm').onsubmit=async e=>{e.preventDefault();const n=new FormData(e.target).get('name'),c=state.connections[0];try{const x=await api('/api/keys',{method:'POST',body:JSON.stringify({Name:n,ConnectionID:c.id})});state=await api('/api/state');selectedKey=x.id;showCreated(selectedKey,n)}catch(x){toast(x.message,true)}};
 }
-
-function renderConnections(){
-  const body=$('#connectionsBody'); body.innerHTML=''; $('#connectionsEmpty').classList.toggle('hidden',state.connections.length>0);
-  for(const c of state.connections){
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td><b>${escapeHtml(c.name)}</b></td><td>${c.port}</td><td>${escapeHtml(c.aead)}</td><td><code>${escapeHtml(c.table_type)}</code></td><td><span class="status ${c.active?'on':''}">${c.active?'Работает':'Остановлено'}</span></td><td><div class="actions"><button class="btn small" data-restart="${c.id}">↻</button><button class="btn small danger" data-delete-connection="${c.id}">🗑</button></div></td>`;
-    body.appendChild(tr);
-  }
-}
-
-function renderKeys(){
-  const body=$('#keysBody'); body.innerHTML=''; $('#keysEmpty').classList.toggle('hidden',state.keys.length>0);
-  for(const k of state.keys){
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td><b>${escapeHtml(k.Name||k.name)}</b></td><td>${escapeHtml(connName(k.ConnectionID||k.connection_id))}</td><td>${fmtDate(k.CreatedAt||k.created_at)}</td><td><div class="actions"><button class="btn small" data-link="${k.ID||k.id}">🔗 Ссылка</button><button class="btn small" data-qr="${k.ID||k.id}">▦ QR</button><button class="btn small" data-params="${k.ID||k.id}">⚙ Параметры</button><button class="btn small danger" data-delete-key="${k.ID||k.id}">🗑</button></div></td>`;
-    body.appendChild(tr);
-  }
-}
-
-function openModal(html, wide=false){ $('#modalContent').innerHTML=html; $('#modal').classList.toggle('wide',wide); $('#modalBackdrop').classList.remove('hidden'); }
-function closeModal(){ $('#modalBackdrop').classList.add('hidden'); $('#modalContent').innerHTML=''; }
-$('#modalClose').onclick=closeModal;
-$('#modalBackdrop').addEventListener('click',e=>{ if(e.target===$('#modalBackdrop')) closeModal(); });
-
-document.addEventListener('click', async e=>{
-  const b=e.target.closest('[data-action],[data-restart],[data-delete-connection],[data-link],[data-qr],[data-params],[data-delete-key]'); if(!b)return;
-  try{
-    if(b.dataset.action==='new-connection') return connectionModal();
-    if(b.dataset.action==='new-key') return keyModal();
-    if(b.dataset.action==='logs') return logsModal();
-    if(b.dataset.action==='logout'){ await api('/api/logout',{method:'POST'}); return showLogin(); }
-    if(b.dataset.action==='update-core') return updateThing('/api/update/core','Sudoku');
-    if(b.dataset.action==='update-panel') return updateThing('/api/update/panel','панель');
-    if(b.dataset.restart){ await api(`/api/connections/${b.dataset.restart}/restart`,{method:'POST'}); toast('Sudoku перезапущен'); return refreshState(); }
-    if(b.dataset.deleteConnection){ if(confirm('Удалить подключение и все его ключи?')){ await api(`/api/connections/${b.dataset.deleteConnection}`,{method:'DELETE'}); toast('Подключение удалено'); await refreshState(); } return; }
-    if(b.dataset.deleteKey){ if(confirm('Удалить ключ из панели?')){ await api(`/api/keys/${b.dataset.deleteKey}`,{method:'DELETE'}); toast('Ключ удалён'); await refreshState(); } return; }
-    if(b.dataset.link){ const x=await api(`/api/keys/${b.dataset.link}/link`); await navigator.clipboard.writeText(x.link); toast('Ссылка скопирована'); return; }
-    if(b.dataset.params) return paramsModal(b.dataset.params);
-    if(b.dataset.qr) return qrModal(b.dataset.qr);
-  }catch(err){ toast(err.message,true); }
-});
-
-function connectionModal(){
-  openModal(`<div class="modal-body"><h2>Создать подключение</h2><form id="connectionForm"><div class="form-grid">
-    <div class="field"><label>Название</label><input name="name" value="Main" required></div>
-    <div class="field"><label>Порт</label><input name="port" type="number" min="1" max="65535" value="9443" required></div>
-    <div class="field"><label>Метод шифрования</label><select name="aead"><option>chacha20-poly1305</option><option>aes-128-gcm</option></select></div>
-    <div class="field"><label>Тип таблицы</label><select name="table"><option>up_ascii_down_entropy</option><option>prefer_entropy</option><option>prefer_ascii</option><option>up_entropy_down_ascii</option></select></div>
-    <div class="field"><label>Padding минимум</label><input name="pmin" type="number" value="2" min="0"></div>
-    <div class="field"><label>Padding максимум</label><input name="pmax" type="number" value="7" min="0"></div>
-    <div class="field full"><div class="switch-row"><label class="check"><input name="pure" type="checkbox"> Pure Downlink</label><label class="check"><input name="http" type="checkbox"> HTTP Mask</label></div></div>
-  </div><div class="modal-footer"><button type="button" class="btn" id="cancelModal">Отмена</button><button class="btn primary" type="submit">Создать</button></div></form></div>`);
-  $('#cancelModal').onclick=closeModal;
-  $('#connectionForm').onsubmit=async e=>{ e.preventDefault(); const f=new FormData(e.target); try{ await api('/api/connections',{method:'POST',body:JSON.stringify({name:f.get('name'),port:+f.get('port'),AEAD:f.get('aead'),TableType:f.get('table'),PaddingMin:+f.get('pmin'),PaddingMax:+f.get('pmax'),PureDownlink:f.get('pure')==='on',HTTPMask:f.get('http')==='on'})}); closeModal(); toast('Подключение создано'); await refreshState(); }catch(err){toast(err.message,true)} };
-}
-
-function keyModal(){
-  if(!state.connections.length) return toast('Сначала создай подключение',true);
-  const opts=state.connections.map(c=>`<option value="${c.id}">${escapeHtml(c.name)} · ${c.port}</option>`).join('');
-  openModal(`<div class="modal-body"><h2>Создать ключ доступа</h2><form id="keyForm"><div class="form-grid"><div class="field"><label>Название</label><input name="name" placeholder="iPhone" required></div><div class="field"><label>Подключение</label><select name="connection">${opts}</select></div></div><div class="modal-footer"><button type="button" class="btn" id="cancelModal">Отмена</button><button class="btn primary" type="submit">Создать ключ</button></div></form></div>`);
-  $('#cancelModal').onclick=closeModal;
-  $('#keyForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);try{await api('/api/keys',{method:'POST',body:JSON.stringify({Name:f.get('name'),ConnectionID:f.get('connection')})});closeModal();toast('Ключ создан');await refreshState()}catch(err){toast(err.message,true)}};
-}
-
-async function paramsModal(id){
-  const p=await api(`/api/keys/${id}/params`); const fields=[['IP-адрес сервера','server'],['Порт','port'],['Ключ / Пароль','key'],['Метод шифрования','aead'],['Тип таблицы','table_type'],['Пользовательская таблица','custom_table'],['Padding','padding'],['Pure Downlink','pure'],['HTTP Mask','http']];
-  const values={...p,padding:`${p.padding_min} – ${p.padding_max}`,pure:p.pure_downlink?'Включено':'Выключено',http:p.http_mask?'Включено':'Выключено'};
-  openModal(`<div class="modal-body"><h2>Параметры подключения</h2><div class="params-grid">${fields.map(([l,k])=>`<div class="param"><label>${l}</label><div class="param-box"><code>${escapeHtml(values[k]??'—')}</code><button class="btn small" data-copy-value="${escapeHtml(values[k]??'')}">⧉</button></div></div>`).join('')}</div><div class="modal-footer"><button class="btn" id="copyLinkFromParams">Копировать ссылку</button><button class="btn primary" id="closeParams">Готово</button></div></div>`);
-  $$('[data-copy-value]').forEach(x=>x.onclick=async()=>{await navigator.clipboard.writeText(x.dataset.copyValue);toast('Скопировано')});
-  $('#copyLinkFromParams').onclick=async()=>{const x=await api(`/api/keys/${id}/link`);await navigator.clipboard.writeText(x.link);toast('Ссылка скопирована')}; $('#closeParams').onclick=closeModal;
-}
-
-function qrModal(id){ openModal(`<div class="modal-body"><h2>QR-код</h2><div class="qr-wrap"><img src="/api/keys/${id}/qr" alt="QR"></div><div class="modal-footer"><button class="btn primary" id="closeQR">Готово</button></div></div>`); $('#closeQR').onclick=closeModal; }
-async function logsModal(){ const x=await api('/api/logs'); openModal(`<div class="modal-body"><h2>Логи Sudoku</h2><pre class="logs">${escapeHtml(x.logs)}</pre><div class="modal-footer"><button class="btn" id="refreshLogs">Обновить</button><button class="btn primary" id="closeLogs">Закрыть</button></div></div>`,true); $('#closeLogs').onclick=closeModal; $('#refreshLogs').onclick=logsModal; }
-async function updateThing(url,label){
-  if(!confirm(`Проверить последнюю версию: ${label}?`))return;
-  toast('Проверяю обновление…');
-  try{
-    const result=await api(url,{method:'POST'});
-    toast(result.message||`${label}: обновление завершено`);
-    if(result.updated){ setTimeout(()=>location.reload(),1200); }
-    else { await refreshState(); }
-  }catch(err){toast(err.message,true)}
-}
-
-async function refreshMetrics(){
-  try{ const m=await api('/api/metrics'); updateMetric(m); }catch{}
-}
-function push(arr,v){arr.push(Number(v)||0);if(arr.length>45)arr.shift()}
-function updateMetric(m){
-  $('#cpuValue').textContent=m.cpu_percent.toFixed(1); $('#cpuMeta').textContent=`${m.cpu_cores} ядер`;
-  $('#memoryValue').textContent=m.memory_percent.toFixed(1); $('#memoryMeta').textContent=`${bytes(m.memory_used)} / ${bytes(m.memory_total)}`;
-  $('#diskValue').textContent=m.disk_percent.toFixed(1); $('#diskMeta').textContent=`${bytes(m.disk_used)} / ${bytes(m.disk_total)}`;
-  $('#rxRate').textContent=rate(m.rx_rate); $('#txRate').textContent=rate(m.tx_rate); $('#rxTotal').textContent=`↓ ${bytes(m.rx_total)}`; $('#txTotal').textContent=`↑ ${bytes(m.tx_total)}`;
-  push(histories.cpu,m.cpu_percent); push(histories.memory,m.memory_percent); push(histories.disk,m.disk_percent); push(histories.rx,m.rx_rate); push(histories.tx,m.tx_rate);
-  drawSingle('cpuChart',histories.cpu,'#1677ff',100); drawSingle('memoryChart',histories.memory,'#7c3aed',100); drawSingle('diskChart',histories.disk,'#12b76a',100); drawTraffic();
-}
-function setupCanvas(id){ const c=document.getElementById(id),dpr=devicePixelRatio||1,r=c.getBoundingClientRect();c.width=Math.max(1,r.width*dpr);c.height=Math.max(1,r.height*dpr);const x=c.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return {c,x,w:r.width,h:r.height}; }
-function drawSingle(id,data,color,max=0){ if(!data.length)return;const {x,w,h}=setupCanvas(id);const M=max||Math.max(...data,1);x.clearRect(0,0,w,h);const pts=data.map((v,i)=>[i/(Math.max(data.length-1,1))*w,h-8-(v/M)*(h-18)]);const g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,color+'38');g.addColorStop(1,color+'00');x.beginPath();x.moveTo(pts[0][0],h);pts.forEach(p=>x.lineTo(...p));x.lineTo(pts.at(-1)[0],h);x.closePath();x.fillStyle=g;x.fill();x.beginPath();pts.forEach((p,i)=>i?x.lineTo(...p):x.moveTo(...p));x.strokeStyle=color;x.lineWidth=2;x.stroke(); }
-function drawTraffic(){const {x,w,h}=setupCanvas('trafficChart');const max=Math.max(...histories.rx,...histories.tx,1);const draw=(arr,color)=>{const pts=arr.map((v,i)=>[i/(Math.max(arr.length-1,1))*w,h-7-(v/max)*(h-15)]);x.beginPath();pts.forEach((p,i)=>i?x.lineTo(...p):x.moveTo(...p));x.strokeStyle=color;x.lineWidth=2;x.stroke()};x.clearRect(0,0,w,h);draw(histories.rx,'#3b82f6');draw(histories.tx,'#7c3aed');}
-
-setInterval(refreshMetrics,2500); setInterval(()=>refreshState().catch(()=>{}),10000); window.addEventListener('resize',()=>{if(!$('#app').classList.contains('hidden')) refreshMetrics()});
+async function showCreated(id,n){const x=await api(`/api/keys/${id}/link`);modal(`<div class="qr-created"><h2>Ключ создан</h2><p><b>${esc(n)}</b></p><img src="${BASE}/api/keys/${id}/qr"><div class="modal-actions"><button data-manual="${id}">Параметры</button><button class="primary" data-copy="${id}">Скопировать ссылку</button></div></div>`)}
+async function manual(id){const p=await api(`/api/keys/${id}/params`),k=state.keys.find(x=>(x.ID||x.id)===id);const rows=[['Адрес',p.server],['Порт',p.port],['Ключ',p.key],['Метод',p.aead],['Тип таблицы',p.table_type],['Padding',String(p.padding_min)+'–'+String(p.padding_max)],['Pure Downlink',p.pure_downlink?'Включено':'Выключено'],['HTTP Mask',p.http_mask?'Включено':'Выключено'],['Multiplex',p.multiplex||'Выключено']];modal(`<h2>Параметры — ${esc(k?.Name||k?.name)}</h2>${rows.map(([a,b])=>`<div class="param-row"><b>${a}</b><code>${esc(b)}</code><button data-copy-value="${esc(b)}">Копировать</button></div>`).join('')}<p class="muted">Используйте эти данные для ручной настройки, если импорт ссылки или QR недоступен.</p>`)}
+async function copyLink(id){const x=await api(`/api/keys/${id}/link`);await navigator.clipboard.writeText(x.link);toast('Ссылка скопирована')}
+function keyMenu(id){const k=state.keys.find(x=>(x.ID||x.id)===id);modal(`<h2>${esc(k?.Name||k?.name||'Ключ')}</h2><div class="menu-list"><button data-qr="${id}">Показать QR</button><button data-copy="${id}">Скопировать ссылку</button><button data-manual="${id}">Показать параметры</button><button data-rename="${id}">Переименовать</button><button class="danger" data-delete-key="${id}">Удалить из панели</button></div>`)}
+function renameKey(id){const k=state.keys.find(x=>(x.ID||x.id)===id);modal(`<h2>Переименовать ключ</h2><form id="renameForm"><input name="name" value="${esc(k?.Name||k?.name)}" required><div class="modal-actions"><button class="primary">Сохранить</button></div></form>`);$('#renameForm').onsubmit=async e=>{e.preventDefault();await api(`/api/keys/${id}`,{method:'PATCH',body:JSON.stringify({name:new FormData(e.target).get('name')})});state=await api('/api/state');closeModal();render();toast('Название сохранено')}}
+async function deleteKey(id){if(!confirm('Ключ исчезнет из панели, но уже экспортированная копия продолжит работать. Для настоящего отзыва нужно сменить Master Key. Удалить?'))return;await api(`/api/keys/${id}`,{method:'DELETE'});state=await api('/api/state');selectedKey=null;closeModal();render();toast('Ключ удалён из панели')}
+function connectionSettings(){const c=state.connections[0];if(!c)return;const rows=[['Название',c.name],['Порт',c.port],['Метод',c.aead],['Тип таблицы',c.table_type],['Padding',c.padding_min+'–'+c.padding_max],['Pure Downlink',c.pure_downlink?'Включено':'Выключено'],['HTTP Mask',c.http_mask?'Включено':'Выключено'],['Multiplex',c.multiplex||'off']];modal(`<h2>Параметры подключения</h2>${rows.map(([a,b])=>`<div class="param-row"><b>${a}</b><code>${esc(b)}</code></div>`).join('')}`)}
+async function logs(){modal('<h2>Логи Sudoku</h2><pre id="logBox" class="logs">Загрузка…</pre><div class="modal-actions"><button id="clearLogs">Очистить окно</button><button id="copyLogs">Копировать</button><button class="primary" id="closeLogs">Закрыть</button></div>');const load=async()=>{const x=await api('/api/logs');const b=$('#logBox');if(b)b.textContent=x.logs};await load();logTimer=setInterval(load,3000);$('#clearLogs').onclick=()=>$('#logBox').textContent='';$('#copyLogs').onclick=()=>navigator.clipboard.writeText($('#logBox').textContent);$('#closeLogs').onclick=closeModal}
+async function updates(){modal('<h2>Обновления</h2><p class="muted">Проверяем GitHub Releases…</p>');const u=await api('/api/updates');const row=(title,x,kind,err)=>`<div class="param-row"><b>${title}</b><span>Установлено: ${esc(x.installed)}<br>Последнее: ${esc(x.latest||'неизвестно')}${err?'<br>'+esc(err):''}</span><button data-update="${kind}">${x.available?'Обновить':'Проверить'}</button></div>`;modal(`<h2>Обновления</h2>${row('Sudoku Core',u.core,'core',u.core_error)}${row('Sudoku UI',u.panel,'panel',u.panel_error)}`)}
+async function update(kind){toast('Скачиваем и проверяем обновление…');try{const x=await api(`/api/update/${kind}`,{method:'POST'});toast(x.message);if(x.updated)setTimeout(()=>location.reload(),1400)}catch(e){toast(e.message,true)}}
+document.addEventListener('click',async e=>{const b=e.target.closest('button,[data-select-key]');if(!b){$('#popover').classList.add('hidden');return}try{if(b.dataset.help){const p=$('#popover'),r=b.getBoundingClientRect();p.textContent=HELP[b.dataset.help];p.style.left=Math.min(r.left,innerWidth-350)+'px';p.style.top=(r.bottom+8)+'px';p.classList.remove('hidden');return}if(!b.closest('#popover'))$('#popover').classList.add('hidden');if(b.id==='menuButton')return $('#menu').classList.toggle('hidden');if(b.dataset.selectKey){selectedKey=b.dataset.selectKey;render();return}if(b.dataset.keyMenu)return keyMenu(b.dataset.keyMenu);if(b.dataset.rename)return renameKey(b.dataset.rename);if(b.dataset.deleteKey)return deleteKey(b.dataset.deleteKey);if(b.dataset.action==='new-key')return newKey();if(b.dataset.action==='logout'){await api('/api/logout',{method:'POST'});return showLogin()}if(b.dataset.action==='logs')return logs();if(b.dataset.action==='updates')return updates();if(b.dataset.action==='restart'){await api(`/api/connections/${state.connections[0].id}/restart`,{method:'POST'});return toast('Sudoku перезапущен')}if(b.dataset.action==='settings')return connectionSettings();if(b.dataset.qr)return showCreated(b.dataset.qr,state.keys.find(k=>(k.ID||k.id)===b.dataset.qr)?.Name||'Ключ');if(b.dataset.copy)return copyLink(b.dataset.copy);if(b.dataset.manual)return manual(b.dataset.manual);if(b.dataset.copyValue){await navigator.clipboard.writeText(b.dataset.copyValue);return toast('Скопировано')}if(b.dataset.update)return update(b.dataset.update)}catch(x){toast(x.message,true)}});
+$('#modalClose').onclick=closeModal;$('#modalBackdrop').onclick=e=>{if(e.target===$('#modalBackdrop'))closeModal()};$('#loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({Username:$('#loginUser').value,Password:$('#loginPass').value})});boot()}catch(x){$('#loginError').textContent=x.message}};
+async function metrics(){try{const m=await api('/api/metrics');$('#metrics').textContent=`CPU ${m.cpu_percent.toFixed(0)}% · RAM ${Math.round(m.memory_used/1048576)} MB · Диск ${m.disk_percent.toFixed(0)}% · ↓ ${rate(m.rx_rate)} · ↑ ${rate(m.tx_rate)}`}catch{}setTimeout(metrics,2500)}function rate(n){for(const u of ['B/s','KB/s','MB/s','GB/s']){if(n<1024)return `${n.toFixed(n<10?1:0)} ${u}`;n/=1024}return `${n.toFixed(1)} TB/s`}
 boot();
