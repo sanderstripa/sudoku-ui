@@ -10,7 +10,7 @@ die(){ echo "Ошибка: $*" >&2; exit 1; }
 case "$(uname -m)" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) die "неподдерживаемая архитектура $(uname -m)";; esac
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl jq qrencode tar iproute2 cron openssl >/dev/null
+apt-get install -y -qq ca-certificates curl jq qrencode tar iproute2 nftables cron openssl >/dev/null
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 release_asset(){ curl -fsSL "https://api.github.com/repos/$1/releases/latest" | jq -r --arg n "$2" '.assets[]|select(.name==$n)|.browser_download_url' | head -n1; }
 

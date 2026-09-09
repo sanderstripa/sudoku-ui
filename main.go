@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -45,6 +46,7 @@ const (
 	sudokuConfigPath = "/etc/sudoku/config.json"
 	sudokuBinary     = "/usr/local/bin/sudoku"
 	panelBinary      = "/usr/local/bin/sudoku-ui"
+	trafficPath      = "/var/lib/sudoku-ui/traffic.json"
 )
 
 //go:embed web/*
@@ -87,6 +89,7 @@ type AccessKey struct {
 	ConnectionID string `json:"connection_id"`
 	PrivateKey   string `json:"private_key"`
 	ShareToken   string `json:"share_token,omitempty"`
+	DeviceType   string `json:"device_type,omitempty"`
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -105,6 +108,7 @@ type App struct {
 	cpuLast  cpuSnapshot
 	netMu    sync.Mutex
 	netLast  netSnapshot
+	traffic  trafficState
 }
 
 type session struct {
@@ -116,6 +120,11 @@ type cpuSnapshot struct{ Idle, Total uint64 }
 type netSnapshot struct {
 	Rx, Tx uint64
 	At     time.Time
+}
+type trafficState struct {
+	Port                   int `json:"port"`
+	Rx, Tx, LastRx, LastTx uint64
+	At                     time.Time
 }
 
 type metricsResponse struct {
@@ -131,6 +140,7 @@ type metricsResponse struct {
 	TxRate        float64 `json:"tx_rate"`
 	RxTotal       uint64  `json:"rx_total"`
 	TxTotal       uint64  `json:"tx_total"`
+	SudokuUptime  uint64  `json:"sudoku_uptime"`
 }
 
 func main() {
@@ -231,6 +241,10 @@ func loadApp() (*App, error) {
 			st.Keys[i].ShareToken = randomHex(16)
 			migrated = true
 		}
+		if st.Keys[i].DeviceType == "" {
+			st.Keys[i].DeviceType = "generic"
+			migrated = true
+		}
 	}
 	if migrated {
 		if err := writeJSON(statePath, st, 0600); err != nil {
@@ -238,6 +252,7 @@ func loadApp() (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, state: st, sessions: map[string]session{}, logins: map[string][]time.Time{}}
+	_ = readJSON(trafficPath, &a.traffic)
 	a.cpuLast = readCPU()
 	a.netLast = readNet()
 	return a, nil
@@ -392,10 +407,10 @@ func (a *App) getState(w http.ResponseWriter, r *http.Request) {
 		views[i].MasterPrivate = ""
 		views[i].AvailablePrivate = ""
 	}
-	type keyView struct{ ID, Name, ConnectionID, CreatedAt string }
+	type keyView struct{ ID, Name, ConnectionID, CreatedAt, DeviceType string }
 	kv := make([]keyView, 0, len(st.Keys))
 	for _, k := range st.Keys {
-		kv = append(kv, keyView{k.ID, k.Name, k.ConnectionID, k.CreatedAt})
+		kv = append(kv, keyView{k.ID, k.Name, k.ConnectionID, k.CreatedAt, k.DeviceType})
 	}
 	suggestedPort := 0
 	if len(st.Connections) == 0 {
@@ -409,6 +424,7 @@ func (a *App) getState(w http.ResponseWriter, r *http.Request) {
 		"keys":           kv,
 		"suggested_port": suggestedPort,
 		"csrf":           a.sessionCSRF(r),
+		"health":         connectionHealth(st.Connections),
 	})
 }
 
@@ -511,6 +527,75 @@ func (a *App) connectionAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == http.MethodPatch && len(parts) == 1:
+		var in Connection
+		if json.NewDecoder(r.Body).Decode(&in) != nil {
+			jsonError(w, "invalid request", 400)
+			return
+		}
+		a.mu.Lock()
+		idx := -1
+		for i := range a.state.Connections {
+			if a.state.Connections[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			a.mu.Unlock()
+			jsonError(w, "not found", 404)
+			return
+		}
+		old := a.state.Connections[idx]
+		a.mu.Unlock()
+		in.ID, in.MasterPrivate, in.MasterPublic, in.AvailablePrivate, in.CreatedAt = old.ID, old.MasterPrivate, old.MasterPublic, old.AvailablePrivate, old.CreatedAt
+		in.FallbackAddress = old.FallbackAddress
+		if strings.TrimSpace(in.Name) == "" {
+			in.Name = "Main"
+		}
+		if in.Port < 1 || in.Port > 65535 || (in.Port != old.Port && portBusy(in.Port)) {
+			jsonError(w, "Некорректный или занятый порт", 409)
+			return
+		}
+		if !validChoice(in.AEAD, "chacha20-poly1305", "aes-128-gcm", "none") || !validChoice(in.TableType, "prefer_entropy", "prefer_ascii", "up_ascii_down_entropy", "up_entropy_down_ascii") || !validChoice(in.Multiplex, "off", "auto", "on") || !validChoice(in.HTTPMode, "legacy", "stream", "poll", "auto", "ws") {
+			jsonError(w, "Выбран неподдерживаемый параметр Sudoku", 400)
+			return
+		}
+		if in.PaddingMin < 0 || in.PaddingMax < in.PaddingMin || in.PaddingMax > 100 {
+			jsonError(w, "Padding должен удовлетворять условию 0 ≤ минимум ≤ максимум ≤ 100", 400)
+			return
+		}
+		if in.Port != old.Port {
+			openFirewall(in.Port)
+		}
+		if err := writeConnectionConfig(in); err != nil {
+			if in.Port != old.Port {
+				closeFirewall(in.Port)
+			}
+			jsonError(w, err.Error(), 500)
+			return
+		}
+		if err := run("systemctl", "restart", "sudoku.service"); err != nil || !waitForSudoku(in.Port, 5*time.Second) {
+			_ = writeConnectionConfig(old)
+			_ = run("systemctl", "restart", "sudoku.service")
+			if in.Port != old.Port {
+				closeFirewall(in.Port)
+			}
+			jsonError(w, "Новые параметры не запустились. Предыдущая рабочая конфигурация восстановлена", 500)
+			return
+		}
+		a.mu.Lock()
+		a.state.Connections[idx] = in
+		err := writeJSON(statePath, a.state, 0600)
+		a.mu.Unlock()
+		if err != nil {
+			jsonError(w, err.Error(), 500)
+			return
+		}
+		if in.Port != old.Port {
+			closeFirewall(old.Port)
+		}
+		jsonOut(w, map[string]any{"ok": true})
 	case r.Method == http.MethodDelete && len(parts) == 1:
 		a.mu.Lock()
 		idx := -1
@@ -558,7 +643,7 @@ func (a *App) keys(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var in struct{ Name, ConnectionID string }
+	var in struct{ Name, ConnectionID, DeviceType string }
 	if json.NewDecoder(r.Body).Decode(&in) != nil || in.ConnectionID == "" {
 		jsonError(w, "invalid request", 400)
 		return
@@ -591,7 +676,10 @@ func (a *App) keys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, ShareToken: randomHex(16), CreatedAt: time.Now().Format(time.RFC3339)}
+	if !validChoice(in.DeviceType, "smartphone", "tablet", "laptop", "desktop", "router", "generic") {
+		in.DeviceType = "generic"
+	}
+	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, ShareToken: randomHex(16), DeviceType: in.DeviceType, CreatedAt: time.Now().Format(time.RFC3339)}
 	a.mu.Lock()
 	if connectionIndex >= 0 && a.state.Connections[connectionIndex].AvailablePrivate == priv {
 		a.state.Connections[connectionIndex].AvailablePrivate = ""
@@ -650,7 +738,8 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPatch && len(parts) == 1 {
 		var in struct {
-			Name string `json:"name"`
+			Name       string `json:"name"`
+			DeviceType string `json:"device_type"`
 		}
 		if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Name) == "" {
 			jsonError(w, "Укажите название ключа", http.StatusBadRequest)
@@ -660,6 +749,9 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 		for i := range a.state.Keys {
 			if a.state.Keys[i].ID == id {
 				a.state.Keys[i].Name = strings.TrimSpace(in.Name)
+				if validChoice(in.DeviceType, "smartphone", "tablet", "laptop", "desktop", "router", "generic") {
+					a.state.Keys[i].DeviceType = in.DeviceType
+				}
 			}
 		}
 		err := writeJSON(statePath, a.state, 0600)
@@ -681,9 +773,9 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 	case "params":
 		jsonOut(w, params)
 	case "link":
-		jsonOut(w, map[string]any{"link": a.subscriptionURL(r, *k), "sudoku_link": shortLink(params)})
+		jsonOut(w, map[string]any{"link": shortLink(params), "sudoku_link": shortLink(params), "subscription_link": a.subscriptionURL(r, *k)})
 	case "qr":
-		link := a.subscriptionURL(r, *k)
+		link := shortLink(params)
 		cmd := exec.Command("qrencode", "-o", "-", "-t", "PNG", "-s", "7", "-m", "2", link)
 		out, err := cmd.Output()
 		if err != nil {
@@ -963,8 +1055,129 @@ func (a *App) metrics() metricsResponse {
 	cpu := a.cpuPercent()
 	mt, mu := memInfo()
 	dt, du := diskInfo("/")
-	rx, tx, rr, tr := a.netRates()
-	return metricsResponse{CPUPercent: cpu, CPUCores: runtime.NumCPU(), MemoryPercent: pct(mu, mt), MemoryUsed: mu, MemoryTotal: mt, DiskPercent: pct(du, dt), DiskUsed: du, DiskTotal: dt, RxRate: rr, TxRate: tr, RxTotal: rx, TxTotal: tx}
+	rx, tx, rr, tr := a.sudokuTraffic()
+	return metricsResponse{CPUPercent: cpu, CPUCores: runtime.NumCPU(), MemoryPercent: pct(mu, mt), MemoryUsed: mu, MemoryTotal: mt, DiskPercent: pct(du, dt), DiskUsed: du, DiskTotal: dt, RxRate: rr, TxRate: tr, RxTotal: rx, TxTotal: tx, SudokuUptime: sudokuUptime()}
+}
+
+func (a *App) sudokuTraffic() (uint64, uint64, float64, float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.state.Connections) == 0 {
+		return a.traffic.Rx, a.traffic.Tx, 0, 0
+	}
+	port := a.state.Connections[0].Port
+	if a.traffic.Port != port {
+		a.traffic.Port = port
+		a.traffic.LastRx = 0
+		a.traffic.LastTx = 0
+		_ = setupNftCounters(port)
+	}
+	rawRx, okRx := readNftCounter("sudoku-ui-rx")
+	rawTx, okTx := readNftCounter("sudoku-ui-tx")
+	if !okRx || !okTx {
+		_ = setupNftCounters(port)
+		rawRx, okRx = readNftCounter("sudoku-ui-rx")
+		rawTx, okTx = readNftCounter("sudoku-ui-tx")
+	}
+	now := time.Now()
+	seconds := now.Sub(a.traffic.At).Seconds()
+	var dr, dt uint64
+	if okRx {
+		if rawRx >= a.traffic.LastRx {
+			dr = rawRx - a.traffic.LastRx
+		} else {
+			dr = rawRx
+		}
+		a.traffic.Rx += dr
+		a.traffic.LastRx = rawRx
+	}
+	if okTx {
+		if rawTx >= a.traffic.LastTx {
+			dt = rawTx - a.traffic.LastTx
+		} else {
+			dt = rawTx
+		}
+		a.traffic.Tx += dt
+		a.traffic.LastTx = rawTx
+	}
+	a.traffic.At = now
+	_ = os.MkdirAll(filepath.Dir(trafficPath), 0700)
+	_ = writeJSON(trafficPath, a.traffic, 0600)
+	if seconds <= 0 || seconds > 30 {
+		seconds = 1
+		dr = 0
+		dt = 0
+	}
+	return a.traffic.Rx, a.traffic.Tx, float64(dr) / seconds, float64(dt) / seconds
+}
+
+func setupNftCounters(port int) error {
+	_ = run("nft", "delete", "table", "inet", "sudoku_ui")
+	if err := run("nft", "add", "table", "inet", "sudoku_ui"); err != nil {
+		return err
+	}
+	if err := run("nft", "add", "chain", "inet", "sudoku_ui", "input", "{ type filter hook input priority 0; policy accept; }"); err != nil {
+		return err
+	}
+	if err := run("nft", "add", "chain", "inet", "sudoku_ui", "output", "{ type filter hook output priority 0; policy accept; }"); err != nil {
+		return err
+	}
+	if err := run("nft", "add", "rule", "inet", "sudoku_ui", "input", "tcp", "dport", strconv.Itoa(port), "counter", "comment", "sudoku-ui-rx"); err != nil {
+		return err
+	}
+	return run("nft", "add", "rule", "inet", "sudoku_ui", "output", "tcp", "sport", strconv.Itoa(port), "counter", "comment", "sudoku-ui-tx")
+}
+
+func readNftCounter(comment string) (uint64, bool) {
+	out, err := exec.Command("nft", "list", "table", "inet", "sudoku_ui").CombinedOutput()
+	if err != nil {
+		return 0, false
+	}
+	re := regexp.MustCompile(`counter packets [0-9]+ bytes ([0-9]+).*comment "` + regexp.QuoteMeta(comment) + `"`)
+	m := re.FindStringSubmatch(string(out))
+	if len(m) != 2 {
+		return 0, false
+	}
+	v, e := strconv.ParseUint(m[1], 10, 64)
+	return v, e == nil
+}
+
+func connectionHealth(cs []Connection) map[string]any {
+	if len(cs) == 0 {
+		return map[string]any{"status": "unconfigured", "code": "not_configured"}
+	}
+	c := cs[0]
+	if _, err := os.Stat(sudokuConfigPath); err != nil {
+		return map[string]any{"status": "error", "code": "config_missing"}
+	}
+	if !serviceActive(c.ID) {
+		return map[string]any{"status": "error", "code": "service_inactive"}
+	}
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", c.Port), 250*time.Millisecond)
+	if err != nil {
+		return map[string]any{"status": "warning", "code": "port_unavailable"}
+	}
+	_ = conn.Close()
+	return map[string]any{"status": "ok", "code": "running"}
+}
+
+func sudokuUptime() uint64 {
+	out, err := exec.Command("systemctl", "show", "sudoku.service", "--property=ActiveEnterTimestampMonotonic", "--value").Output()
+	if err != nil {
+		return 0
+	}
+	start, _ := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	b, _ := os.ReadFile("/proc/uptime")
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return 0
+	}
+	up, _ := strconv.ParseFloat(f[0], 64)
+	now := uint64(up * 1000000)
+	if start == 0 || now < start {
+		return 0
+	}
+	return (now - start) / 1000000
 }
 func (a *App) cpuPercent() float64 {
 	a.cpuMu.Lock()
