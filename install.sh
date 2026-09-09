@@ -91,7 +91,22 @@ else
   "$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen ":$PORT" --repo "$REPO" --path "$PUBLIC_PATH"
   PANEL_SUFFIX="/${PUBLIC_PATH}/"
 fi
-systemctl daemon-reload; systemctl enable --now sudoku-ui >/dev/null
+systemctl daemon-reload
+systemctl enable sudoku-ui >/dev/null
+systemctl restart sudoku-ui
+PANEL_READY=0
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:${PORT}${PANEL_SUFFIX}" >/dev/null 2>&1; then
+    PANEL_READY=1
+    break
+  fi
+  sleep 1
+done
+if [[ $PANEL_READY -ne 1 ]]; then
+  echo "Sudoku UI не запустился. Последние строки журнала:" >&2
+  journalctl -u sudoku-ui.service --no-pager -n 30 >&2 || true
+  die "панель не отвечает на локальном порту ${PORT}"
+fi
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow "$PORT/tcp" >/dev/null; fi
 IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 echo; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo
