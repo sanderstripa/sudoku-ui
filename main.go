@@ -1409,10 +1409,7 @@ func installReleaseBinary(repo, name, dst, currentVersion string) (string, bool,
 	if _, err := os.Stat(dst); err == nil {
 		_ = copyFile(dst, backup)
 	}
-	if err := copyFile(bin, dst); err != nil {
-		return "", false, err
-	}
-	if err := os.Chmod(dst, 0755); err != nil {
+	if err := replaceFileAtomic(bin, dst, 0755); err != nil {
 		return "", false, err
 	}
 	return rel.TagName, true, nil
@@ -1704,6 +1701,42 @@ func copyFile(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+func replaceFileAtomic(src, dst string, mode fs.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".update-*")
+	if err != nil {
+		return err
+	}
+	tmp := out.Name()
+	keep := false
+	defer func() {
+		_ = out.Close()
+		if !keep {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	if err = out.Chmod(mode); err != nil {
+		return err
+	}
+	if err = out.Sync(); err != nil {
+		return err
+	}
+	if err = out.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	keep = true
+	return nil
 }
 func jsonOut(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
