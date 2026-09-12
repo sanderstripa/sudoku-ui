@@ -48,7 +48,8 @@ if [[ $CLEAN_INSTALL -eq 1 ]]; then
   fi
   rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui
 fi
-install -m 755 "$TMP/sudoku-ui" "$BIN"
+install -m 755 "$TMP/sudoku-ui" "${BIN}.new"
+mv -f "${BIN}.new" "$BIN"
 if [[ $INSTALL_CORE -eq 1 ]]; then
   CORE_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
   CORE_URL="$(release_asset "$CORE_REPO" "sudoku-linux-${ARCH}.tar.gz")"; [[ -n "$CORE_URL" ]] || die "Sudoku Core release asset not found"
