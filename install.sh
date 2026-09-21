@@ -125,7 +125,7 @@ if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null
 fi
 if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
   ss -lnt 'sport = :80' 2>/dev/null | grep -q LISTEN && die "port 80 is busy; it is required briefly to issue a new IP HTTPS certificate"
-  "$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force || die "HTTPS certificate could not be issued. If the message says rateLimited, wait until the retry-after time shown by Let's Encrypt and run this installer again"
+  "$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 3 --httpport 80 --force || die "HTTPS certificate could not be issued. If the message says rateLimited, wait until the retry-after time shown by Let's Encrypt and run this installer again"
   "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null
 fi
 chmod 600 "$CERT_DIR/privkey.pem"; chmod 644 "$CERT_DIR/fullchain.pem"; "$ACME" --upgrade --auto-upgrade >/dev/null 2>&1 || true
