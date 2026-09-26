@@ -1,0 +1,46 @@
+name: compatible-core-release
+on:
+  push:
+    tags: ['core-v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned official Core
+        run: |
+          git clone https://github.com/SUDOKU-ASCII/sudoku.git core
+          git -C core checkout 4889b53cb35355123bebd40e6c76a9582de7c23d
+          git -C core apply ../core-patches/access-control.patch
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+      - name: Test and build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          cd core
+          go test ./internal/access ./internal/app ./internal/tunnel
+          go build -trimpath -ldflags '-s -w' -o sudoku ./cmd/sudoku-tunnel
+          tar -czf ../sudoku-core-linux-${GOARCH}.tar.gz sudoku
+          cd ..
+          sha256sum sudoku-core-linux-${GOARCH}.tar.gz > sudoku-core-linux-${GOARCH}.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          name: Sudoku Core compatible ${{ github.ref_name }}
+          body: |
+            Compatible Sudoku Core for Sudoku UI. Based on official SUDOKU-ASCII/sudoku commit 4889b53cb35355123bebd40e6c76a9582de7c23d.
+            Adds local access-policy API, per-key sessions and traffic accounting, immediate disconnect on disable/revoke, and persistent revoke policy.
+          files: |
+            sudoku-core-linux-${{ matrix.goarch }}.tar.gz
+            sudoku-core-linux-${{ matrix.goarch }}.tar.gz.sha256

@@ -48,6 +48,9 @@ const (
 	sudokuBinary     = "/usr/local/bin/sudoku"
 	panelBinary      = "/usr/local/bin/sudoku-ui"
 	trafficPath      = "/var/lib/sudoku-ui/traffic.json"
+	coreSocketPath   = "/run/sudoku/core.sock"
+	corePolicyPath   = appDir + "/core-policy.json"
+	coreReleaseRepo  = "sanderstripa/sudoku-ui"
 )
 
 //go:embed web/*
@@ -92,6 +95,25 @@ type AccessKey struct {
 	ShareToken   string `json:"share_token,omitempty"`
 	DeviceType   string `json:"device_type,omitempty"`
 	CreatedAt    string `json:"created_at"`
+	UserHash     string `json:"user_hash"`
+	Status       string `json:"status"`
+	RevokedAt    string `json:"revoked_at,omitempty"`
+}
+
+type CoreSession struct {
+	ID        string    `json:"id"`
+	SourceIP  string    `json:"source_ip"`
+	StartedAt time.Time `json:"started_at"`
+	RX        uint64    `json:"rx"`
+	TX        uint64    `json:"tx"`
+}
+type CoreUser struct {
+	UserHash string        `json:"user_hash"`
+	Status   string        `json:"status"`
+	LastSeen time.Time     `json:"last_seen"`
+	RX       uint64        `json:"rx"`
+	TX       uint64        `json:"tx"`
+	Sessions []CoreSession `json:"sessions"`
 }
 
 type State struct {
@@ -236,6 +258,21 @@ func loadApp() (*App, error) {
 	if err := readJSON(statePath, &st); err != nil {
 		return nil, fmt.Errorf("read state: %w", err)
 	}
+	migrated := migrateState(&st)
+	if migrated {
+		if err := writeJSON(statePath, st, 0600); err != nil {
+			return nil, fmt.Errorf("migrate state: %w", err)
+		}
+	}
+	a := &App{cfg: cfg, state: st, sessions: map[string]session{}, logins: map[string][]time.Time{}}
+	_ = readJSON(trafficPath, &a.traffic)
+	a.cpuLast = readCPU()
+	a.netLast = readNet()
+	_ = a.syncCorePolicy()
+	return a, nil
+}
+
+func migrateState(st *State) bool {
 	migrated := false
 	for i := range st.Keys {
 		if st.Keys[i].ShareToken == "" {
@@ -246,17 +283,16 @@ func loadApp() (*App, error) {
 			st.Keys[i].DeviceType = "generic"
 			migrated = true
 		}
-	}
-	if migrated {
-		if err := writeJSON(statePath, st, 0600); err != nil {
-			return nil, fmt.Errorf("migrate state: %w", err)
+		if st.Keys[i].UserHash == "" {
+			st.Keys[i].UserHash = userHash(st.Keys[i].PrivateKey)
+			migrated = true
+		}
+		if st.Keys[i].Status == "" {
+			st.Keys[i].Status = "enabled"
+			migrated = true
 		}
 	}
-	a := &App{cfg: cfg, state: st, sessions: map[string]session{}, logins: map[string][]time.Time{}}
-	_ = readJSON(trafficPath, &a.traffic)
-	a.cpuLast = readCPU()
-	a.netLast = readNet()
-	return a, nil
+	return migrated
 }
 
 func (a *App) routes() http.Handler {
@@ -408,10 +444,36 @@ func (a *App) getState(w http.ResponseWriter, r *http.Request) {
 		views[i].MasterPrivate = ""
 		views[i].AvailablePrivate = ""
 	}
-	type keyView struct{ ID, Name, ConnectionID, CreatedAt, DeviceType string }
+	coreUsers, _ := readCoreUsers()
+	coreByHash := map[string]CoreUser{}
+	for _, user := range coreUsers {
+		coreByHash[user.UserHash] = user
+	}
+	type keyView struct {
+		ID           string        `json:"id"`
+		Name         string        `json:"name"`
+		ConnectionID string        `json:"connection_id"`
+		CreatedAt    string        `json:"created_at"`
+		DeviceType   string        `json:"device_type"`
+		UserHash     string        `json:"user_hash"`
+		Status       string        `json:"status"`
+		Online       bool          `json:"online"`
+		LastSeen     string        `json:"last_seen,omitempty"`
+		RX           uint64        `json:"rx"`
+		TX           uint64        `json:"tx"`
+		Sessions     []CoreSession `json:"sessions"`
+	}
 	kv := make([]keyView, 0, len(st.Keys))
 	for _, k := range st.Keys {
-		kv = append(kv, keyView{k.ID, k.Name, k.ConnectionID, k.CreatedAt, k.DeviceType})
+		if k.Status == "revoked" {
+			continue
+		}
+		u := coreByHash[k.UserHash]
+		lastSeen := ""
+		if !u.LastSeen.IsZero() {
+			lastSeen = u.LastSeen.Format(time.RFC3339)
+		}
+		kv = append(kv, keyView{ID: k.ID, Name: k.Name, ConnectionID: k.ConnectionID, CreatedAt: k.CreatedAt, DeviceType: k.DeviceType, UserHash: k.UserHash, Status: k.Status, Online: len(u.Sessions) > 0, LastSeen: lastSeen, RX: u.RX, TX: u.TX, Sessions: u.Sessions})
 	}
 	suggestedPort := 0
 	if len(st.Connections) == 0 {
@@ -684,7 +746,7 @@ func (a *App) keys(w http.ResponseWriter, r *http.Request) {
 	if !validChoice(in.DeviceType, "smartphone", "tablet", "laptop", "desktop", "router", "generic") {
 		in.DeviceType = "generic"
 	}
-	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, ShareToken: randomHex(16), DeviceType: in.DeviceType, CreatedAt: time.Now().Format(time.RFC3339)}
+	k := AccessKey{ID: randomID(), Name: in.Name, ConnectionID: c.ID, PrivateKey: priv, ShareToken: randomHex(16), DeviceType: in.DeviceType, CreatedAt: time.Now().Format(time.RFC3339), UserHash: userHash(priv), Status: "enabled"}
 	a.mu.Lock()
 	if connectionIndex >= 0 && a.state.Connections[connectionIndex].AvailablePrivate == priv {
 		a.state.Connections[connectionIndex].AvailablePrivate = ""
@@ -696,6 +758,7 @@ func (a *App) keys(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), 500)
 		return
 	}
+	_ = a.syncCorePolicy()
 	jsonOut(w, map[string]any{"ok": true, "id": k.ID})
 }
 
@@ -729,16 +792,52 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete && len(parts) == 1 {
 		a.mu.Lock()
-		nk := a.state.Keys[:0]
-		for _, x := range a.state.Keys {
-			if x.ID != id {
-				nk = append(nk, x)
+		for i := range a.state.Keys {
+			if a.state.Keys[i].ID == id {
+				a.state.Keys[i].Status = "revoked"
+				a.state.Keys[i].RevokedAt = time.Now().Format(time.RFC3339)
 			}
 		}
-		a.state.Keys = nk
-		_ = writeJSON(statePath, a.state, 0600)
+		err := writeJSON(statePath, a.state, 0600)
 		a.mu.Unlock()
+		if err != nil {
+			jsonError(w, err.Error(), 500)
+			return
+		}
+		if err := a.syncCorePolicy(); err != nil {
+			jsonError(w, "Ключ отозван, но Core недоступен: "+err.Error(), 503)
+			return
+		}
 		jsonOut(w, map[string]any{"ok": true})
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) == 2 && (parts[1] == "enable" || parts[1] == "disable") {
+		status := "enabled"
+		if parts[1] == "disable" {
+			status = "disabled"
+		}
+		a.mu.Lock()
+		for i := range a.state.Keys {
+			if a.state.Keys[i].ID == id {
+				if a.state.Keys[i].Status == "revoked" {
+					a.mu.Unlock()
+					jsonError(w, "Отозванный ключ нельзя включить", 409)
+					return
+				}
+				a.state.Keys[i].Status = status
+			}
+		}
+		err := writeJSON(statePath, a.state, 0600)
+		a.mu.Unlock()
+		if err != nil {
+			jsonError(w, err.Error(), 500)
+			return
+		}
+		if err := a.syncCorePolicy(); err != nil {
+			jsonError(w, "Состояние сохранено, но Core недоступен: "+err.Error(), 503)
+			return
+		}
+		jsonOut(w, map[string]any{"ok": true, "status": status})
 		return
 	}
 	if r.Method == http.MethodPatch && len(parts) == 1 {
@@ -836,6 +935,10 @@ func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if key.Status != "enabled" {
+		http.Error(w, "Ключ отключён или отозван", http.StatusGone)
+		return
+	}
 	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, clashYAML(*conn, *key, publicHost(r)))
@@ -868,7 +971,10 @@ func (a *App) getUpdates(w http.ResponseWriter, r *http.Request) {
 		panelRepo = PanelRepo
 	}
 	panelLatest, panelErr := latestRelease(panelRepo)
-	coreLatest, coreErr := latestRelease("SUDOKU-ASCII/sudoku")
+	coreLatest, _, _, coreErr := latestCoreRelease()
+	if !versionAtLeast(Version, "0.5.0") {
+		coreErr = errors.New("Сначала обновите Sudoku UI до v0.5.0 или новее")
+	}
 	result := map[string]any{
 		"panel": map[string]any{"installed": displayVersion(Version), "latest": displayVersion(panelLatest), "available": panelErr == nil && !sameVersion(Version, panelLatest)},
 		"core":  map[string]any{"installed": installedCoreVersion(), "latest": displayVersion(coreLatest), "available": coreErr == nil && !sameVersion(installedCoreVersion(), coreLatest)},
@@ -887,7 +993,15 @@ func (a *App) updateCore(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(405)
 		return
 	}
-	version, updated, err := installLatestSudoku(false)
+	if !versionAtLeast(Version, "0.5.0") {
+		jsonError(w, "Сначала обновите Sudoku UI", http.StatusConflict)
+		return
+	}
+	if _, err := a.saveCorePolicy(); err != nil {
+		jsonError(w, "Не удалось подготовить политику ключей: "+err.Error(), 500)
+		return
+	}
+	version, updated, err := installCompatibleCore(false)
 	if err != nil {
 		jsonError(w, err.Error(), 500)
 		return
@@ -899,7 +1013,22 @@ func (a *App) updateCore(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 	if updated && len(ids) > 0 {
-		_ = run("systemctl", "restart", "sudoku.service")
+		if err := run("systemctl", "restart", "sudoku.service"); err != nil {
+			_ = copyFile(sudokuBinary+".bak", sudokuBinary)
+			_ = run("systemctl", "restart", "sudoku.service")
+			jsonError(w, "Core не запустился; восстановлена предыдущая версия: "+err.Error(), 500)
+			return
+		}
+		if !waitForSudokuAPI(5 * time.Second) {
+			_ = copyFile(sudokuBinary+".bak", sudokuBinary)
+			_ = run("systemctl", "restart", "sudoku.service")
+			jsonError(w, "Core не прошёл проверку после обновления; восстановлена предыдущая версия", 500)
+			return
+		}
+		if err := a.syncCorePolicy(); err != nil {
+			jsonError(w, "Core обновлён, но политика ключей не применена: "+err.Error(), 500)
+			return
+		}
 	}
 	message := "Обновлений нет — установлена свежая версия " + version
 	if updated {
@@ -1279,12 +1408,56 @@ func pct(used, total uint64) float64 {
 }
 
 func installLatestSudoku(force bool) (string, bool, error) {
+	return installCompatibleCore(force)
+}
+
+func installCompatibleCore(force bool) (string, bool, error) {
 	currentVersion := installedCoreVersion()
 	if force || currentVersion == "неизвестна" {
 		currentVersion = ""
 	}
-	version, updated, err := installReleaseBinary("SUDOKU-ASCII/sudoku", "sudoku", sudokuBinary, currentVersion)
+	version, assetURL, checksumURL, err := latestCoreRelease()
 	if err != nil {
+		return "", false, err
+	}
+	if !force && currentVersion != "" && sameVersion(currentVersion, version) {
+		return version, false, nil
+	}
+	tmp, err := os.MkdirTemp("", "sudoku-core-update-")
+	if err != nil {
+		return "", false, err
+	}
+	defer os.RemoveAll(tmp)
+	pkg := filepath.Join(tmp, filepath.Base(assetURL))
+	if err = download(assetURL, pkg); err != nil {
+		return "", false, err
+	}
+	if checksumURL == "" {
+		return "", false, errors.New("релиз Core не содержит контрольную сумму")
+	}
+	sumPath := pkg + ".sha256"
+	if err = download(checksumURL, sumPath); err != nil {
+		return "", false, err
+	}
+	if err = verifyChecksum(pkg, sumPath); err != nil {
+		return "", false, err
+	}
+	bin, err := extractBinary(pkg, tmp, "sudoku")
+	if err != nil {
+		return "", false, err
+	}
+	if err = os.Chmod(bin, 0755); err != nil {
+		return "", false, err
+	}
+	if err = validateReleaseBinary("sudoku", bin); err != nil {
+		return "", false, err
+	}
+	if _, err = os.Stat(sudokuBinary); err == nil {
+		if err = copyFile(sudokuBinary, sudokuBinary+".bak"); err != nil {
+			return "", false, err
+		}
+	}
+	if err = replaceFileAtomic(bin, sudokuBinary, 0755); err != nil {
 		return "", false, err
 	}
 	if err := os.MkdirAll(appDir, 0700); err != nil {
@@ -1293,7 +1466,7 @@ func installLatestSudoku(force bool) (string, bool, error) {
 	if err := os.WriteFile(coreVersionPath, []byte(version+"\n"), 0600); err != nil {
 		return "", false, err
 	}
-	return version, updated, nil
+	return version, true, nil
 }
 
 func latestRelease(repo string) (string, error) {
@@ -1365,6 +1538,7 @@ func installReleaseBinary(repo, name, dst, currentVersion string) (string, bool,
 		tokens = append(tokens, "aarch64")
 	}
 	var url, asset string
+	var checksumURL string
 	for _, a := range rel.Assets {
 		ln := strings.ToLower(a.Name)
 		if !strings.Contains(ln, "linux") {
@@ -1393,6 +1567,22 @@ func installReleaseBinary(repo, name, dst, currentVersion string) (string, bool,
 	defer os.RemoveAll(tmp)
 	pkg := filepath.Join(tmp, asset)
 	if err := download(url, pkg); err != nil {
+		return "", false, err
+	}
+	for _, a := range rel.Assets {
+		if a.Name == asset+".sha256" {
+			checksumURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if checksumURL == "" {
+		return "", false, errors.New("релиз не содержит контрольную сумму")
+	}
+	sumPath := pkg + ".sha256"
+	if err := download(checksumURL, sumPath); err != nil {
+		return "", false, err
+	}
+	if err := verifyChecksum(pkg, sumPath); err != nil {
 		return "", false, err
 	}
 	bin, err := extractBinary(pkg, tmp, name)
@@ -1498,7 +1688,10 @@ func validateReleaseBinary(name, path string) error {
 }
 
 func sameVersion(a, b string) bool {
-	normalize := func(v string) string { return strings.TrimPrefix(strings.TrimSpace(v), "v") }
+	normalize := func(v string) string {
+		v = strings.TrimPrefix(strings.TrimSpace(v), "core-")
+		return strings.TrimPrefix(v, "v")
+	}
 	return normalize(a) == normalize(b)
 }
 
@@ -1508,6 +1701,9 @@ func displayVersion(v string) string {
 		return "неизвестна"
 	}
 	if strings.HasPrefix(v, "v") {
+		return v
+	}
+	if strings.HasPrefix(v, "core-v") {
 		return v
 	}
 	return "v" + v
@@ -1658,6 +1854,194 @@ func clientIP(r *http.Request) string {
 
 func requestIsHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func latestCoreRelease() (string, string, string, error) {
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/"+coreReleaseRepo+"/releases?per_page=30", nil)
+	req.Header.Set("User-Agent", "Sudoku-UI/"+Version)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", "", "", fmt.Errorf("GitHub API: %s", resp.Status)
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", "", "", err
+	}
+	arch := runtime.GOARCH
+	for _, rel := range releases {
+		if !strings.HasPrefix(rel.TagName, "core-v") {
+			continue
+		}
+		wanted := "sudoku-core-linux-" + arch + ".tar.gz"
+		var url, sum string
+		for _, a := range rel.Assets {
+			if a.Name == wanted {
+				url = a.URL
+			}
+			if a.Name == wanted+".sha256" {
+				sum = a.URL
+			}
+		}
+		if url != "" {
+			return rel.TagName, url, sum, nil
+		}
+	}
+	return "", "", "", errors.New("совместимый релиз Sudoku Core не найден")
+}
+
+func verifyChecksum(path, sumPath string) error {
+	b, err := os.ReadFile(sumPath)
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return errors.New("пустая контрольная сумма")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return err
+	}
+	if !strings.EqualFold(fields[0], hex.EncodeToString(h.Sum(nil))) {
+		return errors.New("контрольная сумма Core не совпала")
+	}
+	return nil
+}
+
+func versionAtLeast(current, minimum string) bool {
+	parse := func(v string) [3]int {
+		v = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(v), "core-"), "v")
+		v = strings.SplitN(v, "-", 2)[0]
+		p := strings.Split(v, ".")
+		var n [3]int
+		for i := 0; i < len(p) && i < 3; i++ {
+			n[i], _ = strconv.Atoi(p[i])
+		}
+		return n
+	}
+	a, b := parse(current), parse(minimum)
+	for i := 0; i < 3; i++ {
+		if a[i] != b[i] {
+			return a[i] > b[i]
+		}
+	}
+	return true
+}
+
+func waitForSudokuAPI(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := readCoreUsers(); err == nil {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
+}
+
+func userHash(privateKey string) string {
+	b, err := hex.DecodeString(strings.TrimSpace(privateKey))
+	if err != nil {
+		b = []byte(strings.TrimSpace(privateKey))
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:8])
+}
+
+func coreHTTPClient() *http.Client {
+	return &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", coreSocketPath)
+	}}}
+}
+
+func coreRequest(method, path string, body any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, "http://unix"+path, reader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := coreHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("Core API: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
+
+func readCoreUsers() ([]CoreUser, error) {
+	var result struct {
+		APIVersion int        `json:"api_version"`
+		Users      []CoreUser `json:"users"`
+	}
+	if err := coreRequest(http.MethodGet, "/v1/state", nil, &result); err != nil {
+		return nil, err
+	}
+	if result.APIVersion != 1 {
+		return nil, fmt.Errorf("несовместимая версия Core API: %d", result.APIVersion)
+	}
+	return result.Users, nil
+}
+
+func (a *App) syncCorePolicy() error {
+	users, err := a.saveCorePolicy()
+	if err != nil {
+		return err
+	}
+	var result struct {
+		APIVersion int `json:"api_version"`
+	}
+	if err := coreRequest(http.MethodPut, "/v1/policy", map[string]any{"users": users}, &result); err != nil {
+		return err
+	}
+	if result.APIVersion != 1 {
+		return fmt.Errorf("несовместимая версия Core API: %d", result.APIVersion)
+	}
+	return nil
+}
+
+func (a *App) saveCorePolicy() (map[string]string, error) {
+	a.mu.Lock()
+	users := map[string]string{}
+	for _, k := range a.state.Keys {
+		users[k.UserHash] = k.Status
+	}
+	a.mu.Unlock()
+	if err := writeJSON(corePolicyPath, map[string]any{"users": users}, 0600); err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 func (a *App) sessionCSRF(r *http.Request) string {

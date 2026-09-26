@@ -65,3 +65,36 @@ func TestValidationHelpers(t *testing.T) {
 		t.Fatal("sameVersion must ignore a leading v")
 	}
 }
+
+func TestUserHashMatchesCorePrivateKeyBytes(t *testing.T) {
+	if got := userHash("00010203"); got != "054edec1d0211f62" {
+		t.Fatalf("userHash() = %q", got)
+	}
+}
+
+func TestUpdaterCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		current, minimum string
+		want             bool
+	}{
+		{"v0.5.0", "0.5.0", true}, {"v0.5.1", "0.5.0", true}, {"v0.4.9", "0.5.0", false}, {"core-v0.6.0", "0.6.0", true},
+	} {
+		if got := versionAtLeast(tc.current, tc.minimum); got != tc.want {
+			t.Fatalf("versionAtLeast(%q,%q)=%v", tc.current, tc.minimum, got)
+		}
+	}
+}
+
+func TestExistingKeyMigrationPreservesCredentials(t *testing.T) {
+	st := State{Keys: []AccessKey{{ID: "id", Name: "iPhone", PrivateKey: "00010203", ShareToken: "keep", CreatedAt: "2026-01-01T00:00:00Z"}}}
+	if !migrateState(&st) {
+		t.Fatal("migration did not run")
+	}
+	k := st.Keys[0]
+	if k.PrivateKey != "00010203" || k.ShareToken != "keep" || k.ID != "id" {
+		t.Fatalf("credentials changed: %#v", k)
+	}
+	if k.Status != "enabled" || k.UserHash != "054edec1d0211f62" {
+		t.Fatalf("new fields not populated: %#v", k)
+	}
+}

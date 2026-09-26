@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-REPO="${SUDOKU_UI_REPO:-sanderstripa/sudoku-ui}"; CORE_REPO="SUDOKU-ASCII/sudoku"
+REPO="${SUDOKU_UI_REPO:-sanderstripa/sudoku-ui}"; CORE_REPO="${SUDOKU_CORE_REPO:-sanderstripa/sudoku-ui}"
 BIN=/usr/local/bin/sudoku-ui; CORE_BIN=/usr/local/bin/sudoku
 BLUE='\033[1;34m'; RESET='\033[0m'
 echo "Select language / Выберите язык:"; echo "1 — Русский"; echo "2 — English"; read -r -p "[1/2]: " LANG_CHOICE
@@ -20,6 +20,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq; apt-get install -y -qq ca-certificates curl jq qrencode tar iproute2 nftables cron openssl >/dev/null
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 release_asset(){ curl -fsSL "https://api.github.com/repos/$1/releases/latest" | jq -r --arg n "$2" '.assets[]|select(.name==$n)|.browser_download_url' | head -n1; }
+core_release(){ curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases?per_page=30" | jq -r '[.[]|select(.tag_name|startswith("core-v"))][0]'; }
 printf '%b%s%b\n' "$BLUE" "$INSTALLING" "$RESET"
 PANEL_URL="$(release_asset "$REPO" "sudoku-ui-linux-${ARCH}")"; [[ -n "$PANEL_URL" ]] || die "Sudoku UI release asset not found"
 curl -fsSL "$PANEL_URL" -o "$TMP/sudoku-ui"; chmod 755 "$TMP/sudoku-ui"; PANEL_VERSION="$("$TMP/sudoku-ui" --version)"
@@ -51,16 +52,17 @@ fi
 install -m 755 "$TMP/sudoku-ui" "${BIN}.new"
 mv -f "${BIN}.new" "$BIN"
 if [[ $INSTALL_CORE -eq 1 ]]; then
-  CORE_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
-  CORE_URL="$(release_asset "$CORE_REPO" "sudoku-linux-${ARCH}.tar.gz")"; [[ -n "$CORE_URL" ]] || die "Sudoku Core release asset not found"
-  curl -fsSL "$CORE_URL" -o "$TMP/sudoku.tar.gz"; tar -xzf "$TMP/sudoku.tar.gz" -C "$TMP" sudoku; chmod 755 "$TMP/sudoku"
+  CORE_JSON="$(core_release)"; CORE_VERSION="$(jq -r '.tag_name // empty' <<<"$CORE_JSON")"
+  CORE_URL="$(jq -r --arg n "sudoku-core-linux-${ARCH}.tar.gz" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$CORE_JSON")"; [[ -n "$CORE_URL" ]] || die "Sudoku Core release asset not found"
+  CORE_SUM_URL="$(jq -r --arg n "sudoku-core-linux-${ARCH}.tar.gz.sha256" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$CORE_JSON")"; [[ -n "$CORE_SUM_URL" ]] || die "Sudoku Core checksum not found"
+  curl -fsSL "$CORE_URL" -o "$TMP/sudoku.tar.gz"; curl -fsSL "$CORE_SUM_URL" -o "$TMP/sudoku.tar.gz.sha256"; (cd "$TMP" && sha256sum -c sudoku.tar.gz.sha256) || die "Sudoku Core checksum mismatch"; tar -xzf "$TMP/sudoku.tar.gz" -C "$TMP" sudoku; chmod 755 "$TMP/sudoku"
   "$TMP/sudoku" -keygen | grep -q 'Master Public Key:' || die "Sudoku Core keygen check failed"; install -m 755 "$TMP/sudoku" "$CORE_BIN"
 fi
 mkdir -p /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui /var/backups/sudoku-ui; chmod 700 /etc/sudoku-ui /etc/sudoku
 [[ -n "${CORE_VERSION:-}" ]] && printf '%s\n' "$CORE_VERSION" >/etc/sudoku-ui/core-version
 if [[ ! -s /etc/sudoku-ui/core-version && -x "$CORE_BIN" ]]; then
-  DETECT_VERSION="$(curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases/latest" | jq -r '.tag_name // empty')"
-  DETECT_URL="$(release_asset "$CORE_REPO" "sudoku-linux-${ARCH}.tar.gz")"
+  DETECT_JSON="$(core_release)"; DETECT_VERSION="$(jq -r '.tag_name // empty' <<<"$DETECT_JSON")"
+  DETECT_URL="$(jq -r --arg n "sudoku-core-linux-${ARCH}.tar.gz" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$DETECT_JSON")"
   if [[ -n "$DETECT_VERSION" && -n "$DETECT_URL" ]]; then
     mkdir -p "$TMP/detect"; curl -fsSL "$DETECT_URL" -o "$TMP/detect/core.tar.gz"; tar -xzf "$TMP/detect/core.tar.gz" -C "$TMP/detect" sudoku
     [[ "$(sha256sum "$CORE_BIN" | awk '{print $1}')" == "$(sha256sum "$TMP/detect/sudoku" | awk '{print $1}')" ]] && printf '%s\n' "$DETECT_VERSION" >/etc/sudoku-ui/core-version

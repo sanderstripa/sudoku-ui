@@ -1,0 +1,480 @@
+warning: in the working copy of 'internal/app/server.go', LF will be replaced by CRLF the next time Git touches it
+diff --git a/internal/app/server.go b/internal/app/server.go
+index b589555..c6894fe 100644
+--- a/internal/app/server.go
++++ b/internal/app/server.go
+@@ -29,6 +29,7 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	"github.com/SUDOKU-ASCII/sudoku/internal/access"
+ 	"github.com/SUDOKU-ASCII/sudoku/internal/config"
+ 	"github.com/SUDOKU-ASCII/sudoku/internal/handler"
+ 	"github.com/SUDOKU-ASCII/sudoku/internal/protocol"
+@@ -58,6 +59,12 @@ func logUserWarn(tag, userHash, format string, args ...interface{}) {
+ 
+ func RunServer(cfg *config.Config, tables []*sudoku.Table) {
+ 	logx.InstallStd()
++	accessManager := access.NewManager(envOr("SUDOKU_STATS_PATH", "/var/lib/sudoku-ui/core-stats.json"), envOr("SUDOKU_POLICY_PATH", "/etc/sudoku-ui/core-policy.json"))
++	go func() {
++		if err := accessManager.ServeUnix(envOr("SUDOKU_CONTROL_SOCKET", "/run/sudoku/core.sock")); err != nil {
++			logx.Warnf("Access", "local API stopped: %v", err)
++		}
++	}()
+ 
+ 	// Listen on TCP port.
+ 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.LocalPort))
+@@ -122,11 +129,11 @@ func RunServer(cfg *config.Config, tables []*sudoku.Table) {
+ 				continue
+ 			}
+ 		}
+-		go handleServerConn(c, cfg, tables, tunnelSrv, revMgr)
++		go handleServerConn(c, cfg, tables, tunnelSrv, revMgr, accessManager)
+ 	}
+ }
+ 
+-func handleServerConn(rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, tunnelSrv *httpmask.TunnelServer, revMgr *reverse.Manager) {
++func handleServerConn(rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, tunnelSrv *httpmask.TunnelServer, revMgr *reverse.Manager, accessManager *access.Manager) {
+ 	if tunnelSrv != nil {
+ 		res, c, err := tunnelSrv.HandleConn(rawConn)
+ 		if err != nil {
+@@ -140,7 +147,7 @@ func handleServerConn(rawConn net.Conn, cfg *config.Config, tables []*sudoku.Tab
+ 		case httpmask.HandleStartTunnel:
+ 			inner := *cfg
+ 			inner.HTTPMask.Disable = true
+-			handleSudokuServerConn(c, rawConn, &inner, tables, false, revMgr)
++			handleSudokuServerConn(c, rawConn, &inner, tables, false, revMgr, accessManager)
+ 			return
+ 		case httpmask.HandlePassThrough:
+ 			if r, ok := c.(interface{ IsHTTPMaskRejected() bool }); ok && r.IsHTTPMaskRejected() {
+@@ -149,7 +156,7 @@ func handleServerConn(rawConn net.Conn, cfg *config.Config, tables []*sudoku.Tab
+ 				handler.HandleSuspicious(c, rawConn, cfg)
+ 				return
+ 			}
+-			handleSudokuServerConn(c, rawConn, cfg, tables, true, revMgr)
++			handleSudokuServerConn(c, rawConn, cfg, tables, true, revMgr, accessManager)
+ 			return
+ 		default:
+ 			rawConn.Close()
+@@ -157,10 +164,10 @@ func handleServerConn(rawConn net.Conn, cfg *config.Config, tables []*sudoku.Tab
+ 		}
+ 	}
+ 
+-	handleSudokuServerConn(rawConn, rawConn, cfg, tables, true, revMgr)
++	handleSudokuServerConn(rawConn, rawConn, cfg, tables, true, revMgr, accessManager)
+ }
+ 
+-func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, allowFallback bool, revMgr *reverse.Manager) {
++func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, allowFallback bool, revMgr *reverse.Manager, accessManager *access.Manager) {
+ 	// Use Tunnel Abstraction for Handshake and Upgrade
+ 	tunnelConn, meta, err := tunnel.HandshakeAndUpgradeWithTablesMeta(handshakeConn, cfg, tables)
+ 	if err != nil {
+@@ -185,6 +192,20 @@ func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *confi
+ 	if meta != nil {
+ 		userHash = meta.UserHash
+ 	}
++	if accessManager != nil {
++		sourceIP := rawConn.RemoteAddr().String()
++		if host, _, splitErr := net.SplitHostPort(sourceIP); splitErr == nil {
++			sourceIP = host
++		}
++		tracked, trackErr := accessManager.Track(userHash, sourceIP, tunnelConn)
++		if trackErr != nil {
++			logUserWarn("Access", userHash, "connection rejected: %v", trackErr)
++			_ = tunnelConn.Close()
++			return
++		}
++		tunnelConn = tracked
++		defer tunnelConn.Close()
++	}
+ 
+ 	// Read the first KIP control message to detect session type (UoT / Mux / Reverse / normal).
+ 	var msg *tunnel.KIPMessage
+@@ -255,3 +276,10 @@ func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *confi
+ 		return
+ 	}
+ }
++
++func envOr(name, fallback string) string {
++	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
++		return value
++	}
++	return fallback
++}
+warning: in the working copy of 'internal/access/manager.go', LF will be replaced by CRLF the next time Git touches it
+diff --git a/internal/access/manager.go b/internal/access/manager.go
+new file mode 100644
+index 0000000..5acc349
+--- /dev/null
++++ b/internal/access/manager.go
+@@ -0,0 +1,311 @@
++package access
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++)
++
++const APIVersion = 1
++
++type Policy struct {
++	Users map[string]string `json:"users"`
++}
++
++type SessionView struct {
++	ID        string    `json:"id"`
++	SourceIP  string    `json:"source_ip"`
++	StartedAt time.Time `json:"started_at"`
++	RX        uint64    `json:"rx"`
++	TX        uint64    `json:"tx"`
++}
++
++type UserView struct {
++	UserHash string        `json:"user_hash"`
++	Status   string        `json:"status"`
++	LastSeen time.Time     `json:"last_seen,omitempty"`
++	RX       uint64        `json:"rx"`
++	TX       uint64        `json:"tx"`
++	Sessions []SessionView `json:"sessions"`
++}
++
++type persistedUser struct {
++	LastSeen time.Time `json:"last_seen,omitempty"`
++	RX       uint64    `json:"rx"`
++	TX       uint64    `json:"tx"`
++}
++
++type Manager struct {
++	mu         sync.Mutex
++	policy     Policy
++	users      map[string]*persistedUser
++	sessions   map[string]map[string]*trackedConn
++	statsPath  string
++	policyPath string
++	sequence   uint64
++}
++
++func NewManager(statsPath string, policyPaths ...string) *Manager {
++	policyPath := ""
++	if len(policyPaths) > 0 {
++		policyPath = policyPaths[0]
++	}
++	m := &Manager{policy: Policy{Users: map[string]string{}}, users: map[string]*persistedUser{}, sessions: map[string]map[string]*trackedConn{}, statsPath: statsPath, policyPath: policyPath}
++	if b, err := os.ReadFile(statsPath); err == nil {
++		_ = json.Unmarshal(b, &m.users)
++	}
++	if b, err := os.ReadFile(policyPath); err == nil {
++		_ = json.Unmarshal(b, &m.policy)
++		if m.policy.Users == nil {
++			m.policy.Users = map[string]string{}
++		}
++	}
++	return m
++}
++
++func (m *Manager) Allowed(userHash string) bool {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	return m.policy.Users[strings.ToLower(userHash)] != "disabled" && m.policy.Users[strings.ToLower(userHash)] != "revoked"
++}
++
++func (m *Manager) SetPolicy(p Policy) error {
++	clean := Policy{Users: map[string]string{}}
++	for hash, status := range p.Users {
++		hash, status = strings.ToLower(strings.TrimSpace(hash)), strings.ToLower(strings.TrimSpace(status))
++		if hash == "" || (status != "enabled" && status != "disabled" && status != "revoked") {
++			return fmt.Errorf("invalid policy entry %q", hash)
++		}
++		clean.Users[hash] = status
++	}
++	m.mu.Lock()
++	for hash, status := range m.policy.Users {
++		if status == "revoked" {
++			clean.Users[hash] = "revoked"
++		}
++	}
++	m.policy = clean
++	if err := m.persistPolicyLocked(); err != nil {
++		m.mu.Unlock()
++		return err
++	}
++	var closeList []*trackedConn
++	for hash, sessions := range m.sessions {
++		if clean.Users[hash] == "disabled" || clean.Users[hash] == "revoked" {
++			for _, s := range sessions {
++				closeList = append(closeList, s)
++			}
++		}
++	}
++	m.mu.Unlock()
++	for _, s := range closeList {
++		_ = s.Close()
++	}
++	return nil
++}
++
++func (m *Manager) persistPolicyLocked() error {
++	if m.policyPath == "" {
++		return nil
++	}
++	if err := os.MkdirAll(filepath.Dir(m.policyPath), 0700); err != nil {
++		return err
++	}
++	b, err := json.MarshalIndent(m.policy, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp := m.policyPath + ".tmp"
++	if err = os.WriteFile(tmp, b, 0600); err != nil {
++		return err
++	}
++	return os.Rename(tmp, m.policyPath)
++}
++
++func (m *Manager) Track(userHash, sourceIP string, conn net.Conn) (net.Conn, error) {
++	userHash = strings.ToLower(strings.TrimSpace(userHash))
++	if userHash == "" {
++		return nil, errors.New("missing user hash")
++	}
++	if !m.Allowed(userHash) {
++		return nil, errors.New("access key disabled or revoked")
++	}
++	id := fmt.Sprintf("%x", atomic.AddUint64(&m.sequence, 1))
++	t := &trackedConn{Conn: conn, manager: m, userHash: userHash, id: id, sourceIP: sourceIP, startedAt: time.Now()}
++	m.mu.Lock()
++	if m.policy.Users[userHash] == "disabled" || m.policy.Users[userHash] == "revoked" {
++		m.mu.Unlock()
++		return nil, errors.New("access key disabled or revoked")
++	}
++	if m.sessions[userHash] == nil {
++		m.sessions[userHash] = map[string]*trackedConn{}
++	}
++	m.sessions[userHash][id] = t
++	if m.users[userHash] == nil {
++		m.users[userHash] = &persistedUser{}
++	}
++	m.users[userHash].LastSeen = t.startedAt
++	m.mu.Unlock()
++	return t, nil
++}
++
++func (m *Manager) finish(t *trackedConn) {
++	m.mu.Lock()
++	u := m.users[t.userHash]
++	if u == nil {
++		u = &persistedUser{}
++		m.users[t.userHash] = u
++	}
++	u.RX += atomic.LoadUint64(&t.rx)
++	u.TX += atomic.LoadUint64(&t.tx)
++	u.LastSeen = time.Now()
++	delete(m.sessions[t.userHash], t.id)
++	if len(m.sessions[t.userHash]) == 0 {
++		delete(m.sessions, t.userHash)
++	}
++	_ = m.persistLocked()
++	m.mu.Unlock()
++}
++
++func (m *Manager) Snapshot() []UserView {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	hashes := map[string]bool{}
++	for h := range m.users {
++		hashes[h] = true
++	}
++	for h := range m.policy.Users {
++		hashes[h] = true
++	}
++	for h := range m.sessions {
++		hashes[h] = true
++	}
++	keys := make([]string, 0, len(hashes))
++	for h := range hashes {
++		keys = append(keys, h)
++	}
++	sort.Strings(keys)
++	out := make([]UserView, 0, len(keys))
++	for _, h := range keys {
++		v := UserView{UserHash: h, Status: m.policy.Users[h]}
++		if v.Status == "" {
++			v.Status = "enabled"
++		}
++		if u := m.users[h]; u != nil {
++			v.LastSeen, v.RX, v.TX = u.LastSeen, u.RX, u.TX
++		}
++		for _, s := range m.sessions[h] {
++			rx, tx := atomic.LoadUint64(&s.rx), atomic.LoadUint64(&s.tx)
++			v.RX += rx
++			v.TX += tx
++			v.Sessions = append(v.Sessions, SessionView{ID: s.id, SourceIP: s.sourceIP, StartedAt: s.startedAt, RX: rx, TX: tx})
++		}
++		sort.Slice(v.Sessions, func(i, j int) bool { return v.Sessions[i].StartedAt.Before(v.Sessions[j].StartedAt) })
++		out = append(out, v)
++	}
++	return out
++}
++
++func (m *Manager) persistLocked() error {
++	if m.statsPath == "" {
++		return nil
++	}
++	if err := os.MkdirAll(filepath.Dir(m.statsPath), 0700); err != nil {
++		return err
++	}
++	b, err := json.MarshalIndent(m.users, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp := m.statsPath + ".tmp"
++	if err = os.WriteFile(tmp, b, 0600); err != nil {
++		return err
++	}
++	return os.Rename(tmp, m.statsPath)
++}
++
++func (m *Manager) ServeUnix(path string) error {
++	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
++		return err
++	}
++	_ = os.Remove(path)
++	l, err := net.Listen("unix", path)
++	if err != nil {
++		return err
++	}
++	if err := os.Chmod(path, 0600); err != nil {
++		_ = l.Close()
++		return err
++	}
++	mux := http.NewServeMux()
++	mux.HandleFunc("/v1/state", func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			http.Error(w, "method not allowed", 405)
++			return
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"api_version": APIVersion, "users": m.Snapshot()})
++	})
++	mux.HandleFunc("/v1/policy", func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPut {
++			http.Error(w, "method not allowed", 405)
++			return
++		}
++		var p Policy
++		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
++			http.Error(w, "invalid policy", 400)
++			return
++		}
++		if err := m.SetPolicy(p); err != nil {
++			http.Error(w, err.Error(), 400)
++			return
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "api_version": APIVersion})
++	})
++	return (&http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}).Serve(l)
++}
++
++type trackedConn struct {
++	net.Conn
++	manager                *Manager
++	userHash, id, sourceIP string
++	startedAt              time.Time
++	rx, tx                 uint64
++	once                   sync.Once
++}
++
++func (c *trackedConn) Read(p []byte) (int, error) {
++	n, e := c.Conn.Read(p)
++	atomic.AddUint64(&c.rx, uint64(n))
++	return n, e
++}
++func (c *trackedConn) Write(p []byte) (int, error) {
++	n, e := c.Conn.Write(p)
++	atomic.AddUint64(&c.tx, uint64(n))
++	return n, e
++}
++func (c *trackedConn) Close() error {
++	e := c.Conn.Close()
++	c.once.Do(func() { c.manager.finish(c) })
++	return e
++}
++func (c *trackedConn) CloseRead() error {
++	if x, ok := c.Conn.(interface{ CloseRead() error }); ok {
++		return x.CloseRead()
++	}
++	return nil
++}
++func (c *trackedConn) CloseWrite() error {
++	if x, ok := c.Conn.(interface{ CloseWrite() error }); ok {
++		return x.CloseWrite()
++	}
++	return c.Close()
++}
+warning: in the working copy of 'internal/access/manager_test.go', LF will be replaced by CRLF the next time Git touches it
+diff --git a/internal/access/manager_test.go b/internal/access/manager_test.go
+new file mode 100644
+index 0000000..9eaa4cb
+--- /dev/null
++++ b/internal/access/manager_test.go
+@@ -0,0 +1,51 @@
++package access
++
++import (
++	"io"
++	"net"
++	"path/filepath"
++	"testing"
++)
++
++func TestDisableClosesSessionsAndRejectsNew(t *testing.T) {
++	m := NewManager(filepath.Join(t.TempDir(), "stats.json"))
++	a, b := net.Pipe()
++	defer b.Close()
++	c, err := m.Track("abc", "203.0.113.7", a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	go io.Copy(io.Discard, b)
++	if _, err = c.Write([]byte("hello")); err != nil {
++		t.Fatal(err)
++	}
++	before := m.Snapshot()[0]
++	if len(before.Sessions) != 1 || before.Sessions[0].SourceIP != "203.0.113.7" || before.TX != 5 {
++		t.Fatalf("bad accounting: %#v", before)
++	}
++	if err = m.SetPolicy(Policy{Users: map[string]string{"abc": "disabled"}}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = m.Track("abc", "203.0.113.8", a); err == nil {
++		t.Fatal("disabled key accepted")
++	}
++	if len(m.Snapshot()[0].Sessions) != 0 {
++		t.Fatal("active session was not closed")
++	}
++	if m.Snapshot()[0].TX != 5 {
++		t.Fatal("traffic total was not retained")
++	}
++}
++
++func TestRevokedCannotBeEnabledByStalePolicy(t *testing.T) {
++	m := NewManager("")
++	if err := m.SetPolicy(Policy{Users: map[string]string{"abc": "revoked"}}); err != nil {
++		t.Fatal(err)
++	}
++	if err := m.SetPolicy(Policy{Users: map[string]string{"abc": "enabled"}}); err != nil {
++		t.Fatal(err)
++	}
++	if m.Allowed("abc") {
++		t.Fatal("revoked key allowed")
++	}
++}
+
