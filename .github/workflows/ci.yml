@@ -21,3 +21,4 @@ jobs:
         with:
           node-version: '22'
       - run: node --check web/app.js
+      - run: node --check web/game.js
