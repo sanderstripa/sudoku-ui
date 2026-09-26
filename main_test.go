@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -96,5 +98,23 @@ func TestExistingKeyMigrationPreservesCredentials(t *testing.T) {
 	}
 	if k.Status != "enabled" || k.UserHash != "054edec1d0211f62" {
 		t.Fatalf("new fields not populated: %#v", k)
+	}
+}
+
+func TestExtractBinaryIgnoresChecksumSidecar(t *testing.T) {
+	tmp := t.TempDir()
+	pkg := filepath.Join(tmp, "sudoku-ui-linux-amd64")
+	if err := os.WriteFile(pkg, []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pkg+".sha256", []byte("checksum"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := extractBinary(pkg, tmp, "sudoku-ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != pkg {
+		t.Fatalf("selected %q instead of binary %q", got, pkg)
 	}
 }

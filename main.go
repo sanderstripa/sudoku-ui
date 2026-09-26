@@ -1650,7 +1650,7 @@ func extractBinary(pkg, tmp, name string) (string, error) {
 	}
 	var found string
 	filepath.WalkDir(tmp, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Clean(path) == filepath.Clean(pkg) || strings.Contains(path, ".bak") {
+		if err != nil || d.IsDir() || filepath.Clean(path) == filepath.Clean(pkg) || strings.Contains(path, ".bak") || strings.HasSuffix(strings.ToLower(path), ".sha256") {
 			return nil
 		}
 		base := filepath.Base(path)

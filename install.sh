@@ -22,8 +22,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 release_asset(){ curl -fsSL "https://api.github.com/repos/$1/releases/latest" | jq -r --arg n "$2" '.assets[]|select(.name==$n)|.browser_download_url' | head -n1; }
 core_release(){ curl -fsSL "https://api.github.com/repos/${CORE_REPO}/releases?per_page=30" | jq -r '[.[]|select(.tag_name|startswith("core-v"))][0]'; }
 printf '%b%s%b\n' "$BLUE" "$INSTALLING" "$RESET"
-PANEL_URL="$(release_asset "$REPO" "sudoku-ui-linux-${ARCH}")"; [[ -n "$PANEL_URL" ]] || die "Sudoku UI release asset not found"
-curl -fsSL "$PANEL_URL" -o "$TMP/sudoku-ui"; chmod 755 "$TMP/sudoku-ui"; PANEL_VERSION="$("$TMP/sudoku-ui" --version)"
+PANEL_URL="$(release_asset "$REPO" "sudoku-ui-linux-${ARCH}.tar.gz")"; [[ -n "$PANEL_URL" ]] || PANEL_URL="$(release_asset "$REPO" "sudoku-ui-linux-${ARCH}")"; [[ -n "$PANEL_URL" ]] || die "Sudoku UI release asset not found"
+if [[ "$PANEL_URL" == *.tar.gz ]]; then curl -fsSL "$PANEL_URL" -o "$TMP/sudoku-ui.tar.gz"; tar -xzf "$TMP/sudoku-ui.tar.gz" -C "$TMP" sudoku-ui; else curl -fsSL "$PANEL_URL" -o "$TMP/sudoku-ui"; fi; chmod 755 "$TMP/sudoku-ui"; PANEL_VERSION="$("$TMP/sudoku-ui" --version)"
 INSTALL_CORE=1; CLEAN_INSTALL=0
 if [[ -e "$CORE_BIN" || -e /etc/sudoku || -e /etc/systemd/system/sudoku.service || -e "$BIN" ]]; then
   echo; echo "$FOUND"

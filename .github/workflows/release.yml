@@ -24,11 +24,12 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -trimpath -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui-${{ matrix.suffix }} .
-          sha256sum sudoku-ui-${{ matrix.suffix }} > sudoku-ui-${{ matrix.suffix }}.sha256
+          go build -trimpath -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui .
+          tar -czf sudoku-ui-${{ matrix.suffix }}.tar.gz sudoku-ui
+          sha256sum sudoku-ui-${{ matrix.suffix }}.tar.gz > sudoku-ui-${{ matrix.suffix }}.tar.gz.sha256
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            sudoku-ui-${{ matrix.suffix }}
-            sudoku-ui-${{ matrix.suffix }}.sha256
+            sudoku-ui-${{ matrix.suffix }}.tar.gz
+            sudoku-ui-${{ matrix.suffix }}.tar.gz.sha256
           generate_release_notes: true
