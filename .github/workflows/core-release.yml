@@ -23,17 +23,13 @@ jobs:
         with:
           go-version: '1.26.4'
       - name: Test and build
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
         run: |
           cd core
           go test ./internal/access ./internal/app ./internal/tunnel
-          go build -trimpath -ldflags '-s -w' -o sudoku ./cmd/sudoku-tunnel
-          tar -czf ../sudoku-core-linux-${GOARCH}.tar.gz sudoku
+          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o sudoku ./cmd/sudoku-tunnel
+          tar -czf ../sudoku-core-linux-${{ matrix.goarch }}.tar.gz sudoku
           cd ..
-          sha256sum sudoku-core-linux-${GOARCH}.tar.gz > sudoku-core-linux-${GOARCH}.tar.gz.sha256
+          sha256sum sudoku-core-linux-${{ matrix.goarch }}.tar.gz > sudoku-core-linux-${{ matrix.goarch }}.tar.gz.sha256
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: true
