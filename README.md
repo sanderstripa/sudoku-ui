@@ -2,6 +2,11 @@
   <img src="web/icon.png" width="128" height="128" alt="Sudoku UI">
 </p>
 
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/Русский-1f6feb?style=for-the-badge" alt="Русский"></a>
+  <a href="README_EN.md"><img src="https://img.shields.io/badge/English-30363d?style=for-the-badge" alt="English"></a>
+</p>
+
 <h1 align="center">Sudoku UI</h1>
 
 <p align="center">
