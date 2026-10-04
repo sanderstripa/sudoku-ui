@@ -33,11 +33,11 @@ The installer will:
 1. ask you to choose Russian or English;
 2. install verified panel and compatible Core binaries;
 3. create and start the `systemd` services;
-4. obtain a Let's Encrypt HTTPS certificate directly for the public IPv4 address;
+4. obtain a short-lived Let's Encrypt HTTPS certificate directly for the public IPv4 address;
 5. generate a random panel port, hidden path, username, and password;
 6. print the complete HTTPS login URL.
 
-For the initial certificate request, inbound **TCP port 80** must be free and reachable from the internet. You must also open the panel port selected by the installer. A custom domain, DNS configuration, and Caddy are not required.
+For certificate requests, inbound **TCP port 80** must be free and reachable from the internet. You must also open the panel port selected by the installer. A custom domain, DNS configuration, and Caddy are not required. A dedicated `systemd` timer checks the certificate every six hours, renews it before expiry, and reloads the panel automatically.
 
 If Sudoku UI or Sudoku Core is already present, the installer offers to keep the existing Core, replace it with or without a backup, perform a clean reinstall, or remove the managed installation. A normal repeated installation preserves the panel configuration and credentials.
 
@@ -135,6 +135,8 @@ Main server files:
 /etc/sudoku/config.json
 /etc/systemd/system/sudoku-ui.service
 /etc/systemd/system/sudoku.service
+/etc/systemd/system/sudoku-ui-cert-renew.timer
+/usr/local/sbin/sudoku-ui-renew-cert
 /run/sudoku/core.sock
 ```
 

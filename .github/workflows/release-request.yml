@@ -1,0 +1,30 @@
+name: release request
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/release-version']
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create release tag
+        shell: bash
+        run: |
+          tag="$(tr -d '[:space:]' < .github/release-version)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$tag" -m "Sudoku UI $tag"
+          git push origin "$tag"

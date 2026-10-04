@@ -38,7 +38,7 @@ if [[ -e "$CORE_BIN" || -e /etc/sudoku || -e /etc/systemd/system/sudoku.service 
     2) [[ -f "$CORE_BIN" ]] && cp -a "$CORE_BIN" "${CORE_BIN}.before-sudoku-ui";;
     3) :;;
     4) read -r -p "Type DEL / Введите DEL: " confirm; [[ "${confirm^^}" == DEL ]] || exit 0; CLEAN_INSTALL=1;;
-    5) read -r -p "Type DEL / Введите DEL: " confirm; [[ "${confirm^^}" == DEL ]] || exit 0; systemctl disable --now sudoku-ui sudoku 2>/dev/null || true; rm -f /etc/systemd/system/sudoku-ui.service /etc/systemd/system/sudoku.service "$BIN" "$CORE_BIN"; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; nft delete table inet sudoku_ui 2>/dev/null || true; systemctl daemon-reload; echo "Sudoku UI removed / Sudoku UI удалена"; exit 0;;
+    5) read -r -p "Type DEL / Введите DEL: " confirm; [[ "${confirm^^}" == DEL ]] || exit 0; systemctl disable --now sudoku-ui sudoku sudoku-ui-cert-renew.timer 2>/dev/null || true; rm -f /etc/systemd/system/sudoku-ui.service /etc/systemd/system/sudoku.service /etc/systemd/system/sudoku-ui-cert-renew.service /etc/systemd/system/sudoku-ui-cert-renew.timer /usr/local/sbin/sudoku-ui-renew-cert "$BIN" "$CORE_BIN"; rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui; nft delete table inet sudoku_ui 2>/dev/null || true; systemctl daemon-reload; echo "Sudoku UI removed / Sudoku UI удалена"; exit 0;;
     *) exit 0;;
   esac
 fi
@@ -99,8 +99,67 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
+cat >/usr/local/sbin/sudoku-ui-renew-cert <<'SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ACME=/root/.acme.sh/acme.sh
+CERT_DIR=/etc/sudoku-ui/tls
+LOCK_DIR=/run/sudoku-ui-cert-renew.lock
+CHECK_SECONDS=129600
+log(){ logger -t sudoku-ui-cert "$*" 2>/dev/null || true; printf '%s\n' "$*"; }
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { log "certificate renewal must run as root"; exit 1; }
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then log "certificate renewal is already running"; exit 0; fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+mkdir -p "$CERT_DIR"
+if [[ -s "$CERT_DIR/fullchain.pem" ]] && openssl x509 -checkend "$CHECK_SECONDS" -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
+  exit 0
+fi
+IP="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+[[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { log "public IPv4 address was not found"; exit 1; }
+if ss -H -lnt 'sport = :80' 2>/dev/null | grep -q .; then
+  log "port 80 is busy; the short-lived IP certificate cannot be renewed"
+  exit 1
+fi
+if [[ ! -x "$ACME" ]]; then
+  curl -fsSL https://get.acme.sh | sh
+fi
+"$ACME" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+"$ACME" --set-default-ca --server letsencrypt --force >/dev/null
+log "renewing the short-lived HTTPS certificate for $IP"
+"$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days -1 --httpport 80 --force
+"$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl try-restart sudoku-ui.service 2>/dev/null || true" >/dev/null
+chmod 600 "$CERT_DIR/privkey.pem"
+chmod 644 "$CERT_DIR/fullchain.pem"
+openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1 || { log "the renewed certificate did not pass validation"; exit 1; }
+log "HTTPS certificate renewed successfully"
+SCRIPT
+chmod 755 /usr/local/sbin/sudoku-ui-renew-cert
+cat >/etc/systemd/system/sudoku-ui-cert-renew.service <<'UNIT'
+[Unit]
+Description=Renew Sudoku UI short-lived HTTPS certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sudoku-ui-renew-cert
+UNIT
+cat >/etc/systemd/system/sudoku-ui-cert-renew.timer <<'UNIT'
+[Unit]
+Description=Check the Sudoku UI HTTPS certificate
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=10min
+Persistent=true
+Unit=sudoku-ui-cert-renew.service
+
+[Install]
+WantedBy=timers.target
+UNIT
 if [[ $CLEAN_INSTALL -eq 0 && -s /etc/sudoku-ui/config.json ]]; then
-  systemctl daemon-reload; systemctl enable sudoku-ui >/dev/null; systemctl restart sudoku-ui
+  systemctl daemon-reload; systemctl enable sudoku-ui sudoku-ui-cert-renew.timer >/dev/null; /usr/local/sbin/sudoku-ui-renew-cert || die "HTTPS certificate renewal failed; make sure TCP port 80 is available and run the installer again"; systemctl restart sudoku-ui; systemctl start sudoku-ui-cert-renew.timer
   IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
   OLD_LISTEN="$(jq -r '.listen // ":2095"' /etc/sudoku-ui/config.json)"; OLD_PORT="${OLD_LISTEN##*:}"; OLD_PATH="$(jq -r '.public_path // ""' /etc/sudoku-ui/config.json)"
   printf '\n%b━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%b\n\n' "$BLUE" "$RESET"; printf '%b%s%b\n\n' "$BLUE" "$SUCCESS" "$RESET"; printf '%b%s:%b\nhttps://%s:%s%s/\n\n' "$BLUE" "$PANEL" "$RESET" "$IP" "$OLD_PORT" "${OLD_PATH%/}"
@@ -110,30 +169,12 @@ fi
 PORT=""; for _ in $(seq 1 200); do C=$((20000 + RANDOM % 30000)); if ! ss -lnt "sport = :$C" 2>/dev/null | grep -q LISTEN; then PORT="$C"; break; fi; done; [[ -n "$PORT" ]] || die "no free panel port"
 IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"; [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "public IPv4 not found"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow 80/tcp >/dev/null; ufw allow "$PORT/tcp" >/dev/null; fi
-ACME=/root/.acme.sh/acme.sh; [[ -x "$ACME" ]] || curl -fsSL https://get.acme.sh | sh
-CERT_DIR=/etc/sudoku-ui/tls; mkdir -p "$CERT_DIR"; "$ACME" --set-default-ca --server letsencrypt --force >/dev/null
+CERT_DIR=/etc/sudoku-ui/tls; mkdir -p "$CERT_DIR"
 if [[ -s "$TMP/preserved-tls/fullchain.pem" && -s "$TMP/preserved-tls/privkey.pem" ]]; then cp -a "$TMP/preserved-tls/fullchain.pem" "$CERT_DIR/fullchain.pem"; cp -a "$TMP/preserved-tls/privkey.pem" "$CERT_DIR/privkey.pem"; fi
-if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
-  for ACME_DOMAIN_DIR in /root/.acme.sh/"$IP" /root/.acme.sh/"${IP}_ecc" /root/.acme.sh/"$IP"_*; do
-    [[ -d "$ACME_DOMAIN_DIR" ]] || continue
-    ACME_CERT=""; ACME_KEY=""
-    for candidate in "$ACME_DOMAIN_DIR/fullchain.cer" "$ACME_DOMAIN_DIR/${IP}.cer"; do [[ -s "$candidate" ]] && ACME_CERT="$candidate" && break; done
-    for candidate in "$ACME_DOMAIN_DIR/${IP}.key" "$ACME_DOMAIN_DIR/domain.key"; do [[ -s "$candidate" ]] && ACME_KEY="$candidate" && break; done
-    if [[ -n "$ACME_CERT" && -n "$ACME_KEY" ]] && openssl x509 -checkend 3600 -noout -in "$ACME_CERT" >/dev/null 2>&1; then cp -a "$ACME_CERT" "$CERT_DIR/fullchain.pem"; cp -a "$ACME_KEY" "$CERT_DIR/privkey.pem"; break; fi
-  done
-fi
-if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
-  "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null 2>&1 || true
-fi
-if ! openssl x509 -checkend 3600 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
-  ss -lnt 'sport = :80' 2>/dev/null | grep -q LISTEN && die "port 80 is busy; it is required briefly to issue a new IP HTTPS certificate"
-  "$ACME" --issue -d "$IP" --standalone --server letsencrypt --certificate-profile shortlived --days 3 --httpport 80 --force || die "HTTPS certificate could not be issued. If the message says rateLimited, wait until the retry-after time shown by Let's Encrypt and run this installer again"
-  "$ACME" --installcert --force -d "$IP" --key-file "$CERT_DIR/privkey.pem" --fullchain-file "$CERT_DIR/fullchain.pem" --reloadcmd "systemctl restart sudoku-ui 2>/dev/null || true" >/dev/null
-fi
-chmod 600 "$CERT_DIR/privkey.pem"; chmod 644 "$CERT_DIR/fullchain.pem"; "$ACME" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+/usr/local/sbin/sudoku-ui-renew-cert || die "HTTPS certificate could not be issued. Make sure TCP port 80 is available and run this installer again"
 USERNAME="admin-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"; PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"; PUBLIC_PATH="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; PANEL_SUFFIX="/${PUBLIC_PATH}/"
 "$BIN" --init --username "$USERNAME" --password "$PASSWORD" --listen ":$PORT" --repo "$REPO" --path "$PUBLIC_PATH" --cert "$CERT_DIR/fullchain.pem" --key "$CERT_DIR/privkey.pem"
-systemctl daemon-reload; systemctl enable sudoku-ui >/dev/null; systemctl restart sudoku-ui
+systemctl daemon-reload; systemctl enable sudoku-ui sudoku-ui-cert-renew.timer >/dev/null; systemctl restart sudoku-ui; systemctl start sudoku-ui-cert-renew.timer
 PANEL_READY=0; for _ in $(seq 1 30); do if curl -fsS --max-time 3 --resolve "${IP}:${PORT}:127.0.0.1" "https://${IP}:${PORT}${PANEL_SUFFIX}" >/dev/null 2>&1; then PANEL_READY=1; break; fi; sleep 1; done
 [[ $PANEL_READY -eq 1 ]] || { journalctl -u sudoku-ui.service --no-pager -n 30 >&2 || true; die "panel did not start"; }
 printf '\n%b━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%b\n\n' "$BLUE" "$RESET"

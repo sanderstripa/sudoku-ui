@@ -118,3 +118,32 @@ func TestExtractBinaryIgnoresChecksumSidecar(t *testing.T) {
 		t.Fatalf("selected %q instead of binary %q", got, pkg)
 	}
 }
+
+func TestMobileLayoutAndCertificateRenewalArePackaged(t *testing.T) {
+	index, err := os.ReadFile(filepath.Join("web", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"`) ||
+		!strings.Contains(string(index), `href="mobile.css"`) {
+		t.Fatal("the mobile stylesheet or safe-area viewport is missing from index.html")
+	}
+	mobile, err := os.ReadFile(filepath.Join("web", "mobile.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".key-table-head", "display: none", ".key-row", "min-width: 0", "env(safe-area-inset-bottom)"} {
+		if !strings.Contains(string(mobile), want) {
+			t.Fatalf("mobile stylesheet is missing %q", want)
+		}
+	}
+	installer, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"sudoku-ui-cert-renew.timer", "OnUnitActiveSec=6h", "--certificate-profile shortlived --days -1", "openssl x509 -checkend"} {
+		if !strings.Contains(string(installer), want) {
+			t.Fatalf("certificate renewal setup is missing %q", want)
+		}
+	}
+}
