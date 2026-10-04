@@ -11,15 +11,19 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Create release tag
+        id: version
         shell: bash
         run: |
           tag="$(tr -d '[:space:]' < .github/release-version)"
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "Tag $tag already exists"
             exit 0
@@ -28,3 +32,38 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag -a "$tag" -m "Sudoku UI $tag"
           git push origin "$tag"
+
+  build:
+    needs: tag
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm64
+            suffix: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: Test and build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          go test ./...
+          go build -trimpath -ldflags "-s -w -X main.Version=${RELEASE_TAG} -X main.PanelRepo=${GITHUB_REPOSITORY}" -o sudoku-ui .
+          tar -czf sudoku-ui-${{ matrix.suffix }}.tar.gz sudoku-ui
+          sha256sum sudoku-ui-${{ matrix.suffix }}.tar.gz > sudoku-ui-${{ matrix.suffix }}.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag.outputs.tag }}
+          files: |
+            sudoku-ui-${{ matrix.suffix }}.tar.gz
+            sudoku-ui-${{ matrix.suffix }}.tar.gz.sha256
+          generate_release_notes: true
