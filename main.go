@@ -880,6 +880,9 @@ func (a *App) keyAction(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, map[string]any{"link": a.subscriptionURL(r, *k), "sudoku_link": shortLink(params), "subscription_link": a.subscriptionURL(r, *k)})
 	case "qr":
 		link := a.subscriptionURL(r, *k)
+		if r.URL.Query().Get("format") == "sudoku" {
+			link = shortLink(params)
+		}
 		cmd := exec.Command("qrencode", "-o", "-", "-t", "PNG", "-s", "7", "-m", "2", link)
 		out, err := cmd.Output()
 		if err != nil {
