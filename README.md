@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="web/icon.png" width="128" height="128" alt="Sudoku UI">
+  <img src="web/icon-light.png" width="128" height="128" alt="Sudoku UI">
 </p>
 
 <h1 align="center">Sudoku UI</h1>
