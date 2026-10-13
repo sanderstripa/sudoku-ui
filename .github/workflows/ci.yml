@@ -17,6 +17,21 @@ jobs:
       - run: go vet ./...
       - run: go build -trimpath .
       - run: bash -n install.sh
+      - name: Verify published Core used by installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          release=$(curl -fsSL 'https://api.github.com/repos/sanderstripa/sudoku-ui/releases?per_page=30' | jq -c '[.[]|select(.tag_name|startswith("core-v"))][0]')
+          mkdir -p /tmp/installer-core-check
+          cd /tmp/installer-core-check
+          for name in sudoku-core-linux-amd64.tar.gz sudoku-core-linux-amd64.tar.gz.sha256; do
+            url=$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$release")
+            curl -fsSL "$url" -o "$name"
+          done
+          sha256sum -c sudoku-core-linux-amd64.tar.gz.sha256
+          tar -xzf sudoku-core-linux-amd64.tar.gz sudoku
+          output=$(./sudoku -keygen 2>&1)
+          grep -q 'Master Public Key:' <<<"$output"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

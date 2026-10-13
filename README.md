@@ -28,6 +28,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sanderstripa/sudoku-ui/main/
 
 This is the permanent installation URL. The installer automatically downloads the latest stable Sudoku UI release and the latest compatible Sudoku Core release from this repository.
 
+Run the command directly in an interactive root shell. The installer verifies the Core archive checksum and captures both output streams when checking key generation. If a previous attempt reported a checksum or Core keygen error, rerun this command to fetch the corrected installer. Choose replacement with a backup when repairing an incomplete Core installation; normal installation preserves existing panel settings and credentials.
+
 The installer will:
 
 1. ask you to choose Russian or English;

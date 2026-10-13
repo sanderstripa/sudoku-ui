@@ -49,15 +49,15 @@ if [[ $CLEAN_INSTALL -eq 1 ]]; then
   fi
   rm -rf /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui
 fi
-install -m 755 "$TMP/sudoku-ui" "${BIN}.new"
-mv -f "${BIN}.new" "$BIN"
 if [[ $INSTALL_CORE -eq 1 ]]; then
   CORE_JSON="$(core_release)"; CORE_VERSION="$(jq -r '.tag_name // empty' <<<"$CORE_JSON")"
   CORE_URL="$(jq -r --arg n "sudoku-core-linux-${ARCH}.tar.gz" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$CORE_JSON")"; [[ -n "$CORE_URL" ]] || die "Sudoku Core release asset not found"
   CORE_SUM_URL="$(jq -r --arg n "sudoku-core-linux-${ARCH}.tar.gz.sha256" '.assets[]|select(.name==$n)|.browser_download_url' <<<"$CORE_JSON")"; [[ -n "$CORE_SUM_URL" ]] || die "Sudoku Core checksum not found"
-  curl -fsSL "$CORE_URL" -o "$TMP/sudoku.tar.gz"; curl -fsSL "$CORE_SUM_URL" -o "$TMP/sudoku.tar.gz.sha256"; (cd "$TMP" && sha256sum -c sudoku.tar.gz.sha256) || die "Sudoku Core checksum mismatch"; tar -xzf "$TMP/sudoku.tar.gz" -C "$TMP" sudoku; chmod 755 "$TMP/sudoku"
-  "$TMP/sudoku" -keygen | grep -q 'Master Public Key:' || die "Sudoku Core keygen check failed"; install -m 755 "$TMP/sudoku" "$CORE_BIN"
+  curl -fsSL "$CORE_URL" -o "$TMP/sudoku-core-linux-${ARCH}.tar.gz"; curl -fsSL "$CORE_SUM_URL" -o "$TMP/sudoku-core-linux-${ARCH}.tar.gz.sha256"; (cd "$TMP" && sha256sum -c "sudoku-core-linux-${ARCH}.tar.gz.sha256") || die "Sudoku Core checksum mismatch"; tar -xzf "$TMP/sudoku-core-linux-${ARCH}.tar.gz" -C "$TMP" sudoku; chmod 755 "$TMP/sudoku"
+  CORE_KEYGEN="$("$TMP/sudoku" -keygen 2>&1)" || die "Sudoku Core cannot run on this server ($ARCH)"; grep -q 'Master Public Key:' <<<"$CORE_KEYGEN" || die "Sudoku Core keygen check failed"; install -m 755 "$TMP/sudoku" "$CORE_BIN"
 fi
+install -m 755 "$TMP/sudoku-ui" "${BIN}.new"
+mv -f "${BIN}.new" "$BIN"
 mkdir -p /etc/sudoku-ui /etc/sudoku /var/lib/sudoku-ui /var/backups/sudoku-ui; chmod 700 /etc/sudoku-ui /etc/sudoku
 [[ -n "${CORE_VERSION:-}" ]] && printf '%s\n' "$CORE_VERSION" >/etc/sudoku-ui/core-version
 if [[ ! -s /etc/sudoku-ui/core-version && -x "$CORE_BIN" ]]; then
