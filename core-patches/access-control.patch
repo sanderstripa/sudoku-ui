@@ -483,7 +483,7 @@ diff --git a/internal/app/server.go b/internal/app/server.go
 +	handleSudokuServerConn(rawConn, rawConn, cfg, tables, true, revMgr, userReg, accessManagers...)
 +}
 +
-+func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, allowFallback bool, revMgr *reverse.Manager, userReg *users.Registry) {
++func handleSudokuServerConn(handshakeConn net.Conn, rawConn net.Conn, cfg *config.Config, tables []*sudoku.Table, allowFallback bool, revMgr *reverse.Manager, userReg *users.Registry, accessManagers ...*access.Manager) {
 +	// Early-handshake conns are already wire-wrapped inside WrapConn; everything else is counted here.
 +	var wire *users.WireConn
 +	if userReg != nil {
@@ -1002,4 +1002,3 @@ index 0000000..9eaa4cb
 +		t.Fatal("revoked key allowed")
 +	}
 +}
-
