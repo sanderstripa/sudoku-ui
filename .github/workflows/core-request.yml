@@ -1,0 +1,81 @@
+name: compatible-core-request
+on:
+  push:
+    branches: [main]
+    paths: ['.github/core-release-version', 'core-patches/**', '.github/workflows/core-request.yml']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out official v0.5.2.0 and apply compatibility patch
+        run: |
+          git clone https://github.com/SUDOKU-ASCII/sudoku.git core
+          git -C core checkout 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5
+          git -C core apply --check ../core-patches/access-control.patch
+          git -C core apply ../core-patches/access-control.patch
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+      - name: Test access policy and upstream packages
+        run: |
+          cd core
+          go test ./...
+          go test -race ./internal/access
+      - name: Build compatible Core
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          cd core
+          GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o sudoku ./cmd/sudoku-tunnel
+          if [[ "$ARCH" == amd64 ]]; then
+            output=$(./sudoku -keygen 2>&1)
+            grep -q 'Master Public Key:' <<<"$output"
+          fi
+          tar -czf ../sudoku-core-linux-${ARCH}.tar.gz sudoku
+          cd ..
+          sha256sum sudoku-core-linux-${ARCH}.tar.gz > sudoku-core-linux-${ARCH}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.arch }}
+          path: sudoku-core-linux-*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          merge-multiple: true
+          path: dist
+      - name: Verify complete release and create tag
+        id: release
+        run: |
+          cd dist
+          sha256sum -c sudoku-core-linux-amd64.tar.gz.sha256
+          sha256sum -c sudoku-core-linux-arm64.tar.gz.sha256
+          cd ..
+          tag=$(tr -d '[:space:]' < .github/core-release-version)
+          [[ "$tag" =~ ^core-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag "$tag"
+          git push origin "$tag"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          prerelease: true
+          name: Sudoku Core ${{ steps.release.outputs.tag }} (upstream v0.5.2.0)
+          body: |
+            Based on official Sudoku v0.5.2.0, commit 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5.
+            Preserves Sudoku UI local API v1, existing keys, persistent revocation, immediate disable/revoke disconnect, sessions and per-key traffic.
+            Includes upstream performance improvements, user allowlists and external controller.
+            Update using the Sudoku Core button in Sudoku UI. Existing server configuration is preserved.
+          files: dist/*

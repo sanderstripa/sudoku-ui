@@ -104,6 +104,8 @@ Releases: [latest Sudoku UI](https://github.com/sanderstripa/sudoku-ui/releases/
 
 The official Core does not provide the per-user management data required by the panel. Sudoku UI therefore uses a compatible build based on a pinned commit from the official project and applies [`core-patches/access-control.patch`](core-patches/access-control.patch).
 
+The current compatible source targets official **Sudoku v0.5.2.0** (commit `56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5`). The panel continues to use local API v1, so existing keys and server settings remain compatible.
+
 The compatible build adds:
 
 - local API at `/run/sudoku/core.sock`;
