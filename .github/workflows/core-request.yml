@@ -13,15 +13,15 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
-      - name: Check out official v0.5.2.0 and apply compatibility patch
+      - name: Check out official v0.5.2-1 and apply compatibility patch
         run: |
           git clone https://github.com/SUDOKU-ASCII/sudoku.git core
-          git -C core checkout 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5
+          git -C core checkout b1d1f0e767653d2c70e2ff814a01264c7dedf1f4
           git -C core apply --check ../core-patches/access-control.patch
           git -C core apply ../core-patches/access-control.patch
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
       - name: Test access policy and upstream packages
         run: |
           cd core
@@ -72,9 +72,9 @@ jobs:
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           prerelease: true
-          name: Sudoku Core ${{ steps.release.outputs.tag }} (upstream v0.5.2.0)
+          name: Sudoku Core ${{ steps.release.outputs.tag }} (upstream v0.5.2-1)
           body: |
-            Based on official Sudoku v0.5.2.0, commit 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5.
+            Based on official Sudoku v0.5.2-1, commit b1d1f0e767653d2c70e2ff814a01264c7dedf1f4.
             Preserves Sudoku UI local API v1, existing keys, persistent revocation, immediate disable/revoke disconnect, sessions and per-key traffic.
             Includes upstream performance improvements, user allowlists and external controller.
             Update using the Sudoku Core button in Sudoku UI. Existing server configuration is preserved.

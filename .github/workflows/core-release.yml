@@ -17,11 +17,11 @@ jobs:
       - name: Check out pinned official Core
         run: |
           git clone https://github.com/SUDOKU-ASCII/sudoku.git core
-          git -C core checkout 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5
+          git -C core checkout b1d1f0e767653d2c70e2ff814a01264c7dedf1f4
           git -C core apply ../core-patches/access-control.patch
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
       - name: Test and build
         run: |
           cd core
@@ -35,7 +35,7 @@ jobs:
           prerelease: true
           name: Sudoku Core compatible ${{ github.ref_name }}
           body: |
-            Compatible Sudoku Core for Sudoku UI. Based on official SUDOKU-ASCII/sudoku commit 56ce6f1aeea18aa69b9bc1d57557ed312b59e5f5.
+            Compatible Sudoku Core for Sudoku UI. Based on official SUDOKU-ASCII/sudoku commit b1d1f0e767653d2c70e2ff814a01264c7dedf1f4.
             Adds local access-policy API, per-key sessions and traffic accounting, immediate disconnect on disable/revoke, and persistent revoke policy.
           files: |
             sudoku-core-linux-${{ matrix.goarch }}.tar.gz
